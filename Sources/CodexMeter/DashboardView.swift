@@ -59,7 +59,7 @@ private struct QuadrantGrid: View {
         let shortRanks = shortResetRanks
         let weeklyRanks = weeklyResetRanks
 
-        if statuses.count >= 4 {
+        if statuses.count >= 5 {
             AliasQuadrant(
                 status: statuses[0],
                 isMostRecent: statuses[0].id == mostRecentID,
@@ -87,11 +87,13 @@ private struct QuadrantGrid: View {
             .frame(width: halfW, height: halfH)
             .position(x: halfW / 2, y: halfH + halfH / 2)
 
-            AliasQuadrant(
-                status: statuses[3],
-                isMostRecent: statuses[3].id == mostRecentID,
-                rank5H: shortRanks[statuses[3].id],
-                rankWeek: weeklyRanks[statuses[3].id]
+            SharedWeeklyQuadrant(
+                leftStatus: statuses[3],
+                rightStatus: statuses[4],
+                leftMostRecent: statuses[3].id == mostRecentID,
+                rightMostRecent: statuses[4].id == mostRecentID,
+                leftRankWeek: weeklyRanks[statuses[3].id],
+                rightRankWeek: weeklyRanks[statuses[4].id]
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
@@ -189,6 +191,100 @@ private struct AliasQuadrant: View {
                     window: status.snapshot?.weeklyWindow,
                     diameter: 65,
                     resetRank: rankWeek
+                )
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}
+
+// MARK: - Shared weekly quadrant (codex-bio + codex-ster)
+
+private struct SharedWeeklyQuadrant: View {
+    let leftStatus: ProfileStatus
+    let rightStatus: ProfileStatus
+    let leftMostRecent: Bool
+    let rightMostRecent: Bool
+    let leftRankWeek: Int?
+    let rightRankWeek: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            headerRow
+            gaugeRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var headerRow: some View {
+        HStack {
+            HStack(spacing: 4) {
+                Text(leftStatus.profile.displayName)
+                    .font(.system(size: 11, weight: leftMostRecent ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(leftMostRecent ? .primary : .secondary)
+                    .lineLimit(1)
+                if leftStatus.isStale {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
+                if leftStatus.isRefreshing {
+                    ProgressView().controlSize(.mini)
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                if rightStatus.isRefreshing {
+                    ProgressView().controlSize(.mini)
+                }
+                if rightStatus.isStale {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
+                Text(rightStatus.profile.displayName)
+                    .font(.system(size: 11, weight: rightMostRecent ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(rightMostRecent ? .primary : .secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var gaugeRow: some View {
+        HStack(spacing: 0) {
+            if let errorMessage = leftStatus.errorMessage, leftStatus.snapshot == nil {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity)
+            } else {
+                QuotaGauge(
+                    label: "WEEK",
+                    window: leftStatus.snapshot?.weeklyWindow,
+                    diameter: 65,
+                    resetRank: leftRankWeek
+                )
+                .frame(maxWidth: .infinity)
+            }
+
+            if let errorMessage = rightStatus.errorMessage, rightStatus.snapshot == nil {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity)
+            } else {
+                QuotaGauge(
+                    label: "WEEK",
+                    window: rightStatus.snapshot?.weeklyWindow,
+                    diameter: 65,
+                    resetRank: rightRankWeek
                 )
                 .frame(maxWidth: .infinity)
             }
