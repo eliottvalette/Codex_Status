@@ -163,23 +163,23 @@ private struct AliasQuadrant: View {
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
         } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
-            // Profile has no 5H quota — WEEK gauge takes the full width
-            HStack {
-                Spacer()
+            // Profile has no 5H quota — ring fills available space
+            GeometryReader { geo in
+                let diameter = max(50, min(geo.size.width, geo.size.height) - 46)
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
-                    diameter: 50,
+                    diameter: diameter,
                     resetRank: rankWeek
                 )
-                Spacer()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             HStack(spacing: 0) {
                 QuotaGauge(
                     label: "5H",
                     window: status.snapshot?.shortWindow,
-                    diameter: 50,
+                    diameter: 65,
                     resetRank: rank5H
                 )
                 .frame(maxWidth: .infinity)
@@ -187,7 +187,7 @@ private struct AliasQuadrant: View {
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
-                    diameter: 50,
+                    diameter: 65,
                     resetRank: rankWeek
                 )
                 .frame(maxWidth: .infinity)
@@ -212,10 +212,8 @@ private struct QuotaGauge: View {
 
     private var ringColor: Color {
         guard let remaining else { return .secondary }
-        if remaining > 40 { return .green }
-        if remaining > 15 { return .yellow }
-        if remaining > 5 { return .orange }
-        return .red
+        let hue = (remaining / 100) * (120.0 / 360.0)
+        return Color(hue: hue, saturation: 0.8, brightness: 0.85)
     }
 
     private func resetFraction(relativeTo now: Date) -> Double {
@@ -253,7 +251,7 @@ private struct QuotaGauge: View {
     var body: some View {
         VStack(spacing: 3) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .tracking(1)
 
@@ -263,7 +261,7 @@ private struct QuotaGauge: View {
                         ZStack {
                             // Outer track — reset proximity
                             Circle()
-                                .stroke(Color.secondary.opacity(0.18), lineWidth: 3)
+                                .stroke(Color.secondary.opacity(0.18), lineWidth: 4)
                                 .frame(width: outerDiameter, height: outerDiameter)
 
                             // Outer arc — time remaining until reset (full = far, empty = imminent)
@@ -271,14 +269,14 @@ private struct QuotaGauge: View {
                                 .trim(from: 0, to: resetFraction(relativeTo: context.date))
                                 .stroke(
                                     Color.secondary.opacity(0.5),
-                                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                                    style: StrokeStyle(lineWidth: 4, lineCap: .round)
                                 )
                                 .frame(width: outerDiameter, height: outerDiameter)
                                 .rotationEffect(.degrees(-90))
 
                             // Inner track — quota
                             Circle()
-                                .stroke(Color.secondary.opacity(0.15), lineWidth: 4)
+                                .stroke(Color.secondary.opacity(0.15), lineWidth: 5)
                                 .frame(width: diameter, height: diameter)
 
                             // Inner arc — remaining quota
@@ -286,14 +284,14 @@ private struct QuotaGauge: View {
                                 .trim(from: 0, to: remaining / 100)
                                 .stroke(
                                     ringColor,
-                                    style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                                    style: StrokeStyle(lineWidth: 5, lineCap: .round)
                                 )
                                 .frame(width: diameter, height: diameter)
                                 .rotationEffect(.degrees(-90))
                                 .animation(.easeInOut(duration: 0.4), value: remaining)
 
                             Text("\(Int(remaining.rounded()))%")
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 .foregroundStyle(remaining <= 5 ? ringColor : .primary)
                         }
                         .frame(width: outerDiameter, height: outerDiameter)
@@ -306,7 +304,7 @@ private struct QuotaGauge: View {
                             Text(compactCountdown(window!.resetsAt, relativeTo: context.date))
                                 .foregroundStyle(.secondary)
                         }
-                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .font(.system(size: 12, weight: .regular, design: .monospaced))
                     }
                 }
             } else {
