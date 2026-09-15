@@ -24,6 +24,10 @@ Each refresh starts a short-lived `codex app-server` process with the matching
 app does not parse `auth.json`, copy credentials, or use session logs as a
 quota source.
 
+The `LAST USED` badge is computed separately from each profile's local
+`state_5.sqlite` thread index. That database is used only for activity
+ordering, never for quota values.
+
 If a refresh fails, the exact error is shown. A previous successful result may
 remain visible, but it is explicitly marked stale.
 

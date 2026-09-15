@@ -37,6 +37,8 @@ struct ProfileStatus: Identifiable, Sendable {
     let profile: CodexProfile
     var snapshot: QuotaSnapshot?
     var errorMessage: String?
+    var lastActivity: Date?
+    var activityErrorMessage: String?
     var isRefreshing: Bool
 
     var id: String { profile.id }

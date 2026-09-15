@@ -12,7 +12,10 @@ struct DashboardView: View {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(store.statuses) { status in
-                        ProfileCard(status: status)
+                        ProfileCard(
+                            status: status,
+                            isMostRecent: status.id == store.mostRecentProfileID
+                        )
                     }
                 }
                 .padding(12)
@@ -65,12 +68,21 @@ struct DashboardView: View {
 
 private struct ProfileCard: View {
     let status: ProfileStatus
+    let isMostRecent: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(status.profile.displayName)
                     .font(.system(.headline, design: .monospaced))
+                if isMostRecent {
+                    Text("LAST USED")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.blue)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.blue.opacity(0.12), in: Capsule())
+                }
                 Spacer()
                 if status.isRefreshing {
                     ProgressView()
@@ -80,6 +92,17 @@ private struct ProfileCard: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            if let lastActivity = status.lastActivity {
+                Text("Last activity \(lastActivity.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if let activityErrorMessage = status.activityErrorMessage {
+                Text(activityErrorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
             }
 
             if let snapshot = status.snapshot {

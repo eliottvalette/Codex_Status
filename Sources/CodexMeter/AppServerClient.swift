@@ -116,7 +116,10 @@ struct AppServerClient: Sendable {
             }
 
             if descriptor.revents & Int16(POLLIN | POLLHUP) != 0 {
-                let chunk = try output.read(upToCount: 16_384) ?? Data()
+                let chunk = try PipeReader.readAvailableBytes(
+                    from: output.fileDescriptor,
+                    maximumCount: 16_384
+                )
                 if chunk.isEmpty {
                     break
                 }
@@ -145,5 +148,33 @@ struct AppServerClient: Sendable {
             status: process.terminationStatus,
             stderr: stderr
         )
+    }
+}
+
+enum PipeReaderError: Error, LocalizedError {
+    case readFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .readFailed(message):
+            "Could not read codex app-server output: \(message)"
+        }
+    }
+}
+
+enum PipeReader {
+    static func readAvailableBytes(from fileDescriptor: Int32, maximumCount: Int) throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: maximumCount)
+
+        while true {
+            let count = Darwin.read(fileDescriptor, &bytes, maximumCount)
+            if count >= 0 {
+                return Data(bytes.prefix(count))
+            }
+            if errno == EINTR {
+                continue
+            }
+            throw PipeReaderError.readFailed(String(cString: strerror(errno)))
+        }
     }
 }

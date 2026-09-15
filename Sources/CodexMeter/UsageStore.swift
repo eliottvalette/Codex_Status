@@ -16,7 +16,14 @@ final class UsageStore {
         refreshInterval: Duration = .seconds(120)
     ) {
         statuses = profiles.map {
-            ProfileStatus(profile: $0, snapshot: nil, errorMessage: nil, isRefreshing: false)
+            ProfileStatus(
+                profile: $0,
+                snapshot: nil,
+                errorMessage: nil,
+                lastActivity: nil,
+                activityErrorMessage: nil,
+                isRefreshing: false
+            )
         }
         self.client = client
         self.refreshInterval = refreshInterval
@@ -29,6 +36,15 @@ final class UsageStore {
             .compactMap { $0 }
             .map { Int($0.remainingPercent.rounded()) }
             .min()
+    }
+
+    var mostRecentProfileID: String? {
+        statuses
+            .compactMap { status in
+                status.lastActivity.map { (status.id, $0) }
+            }
+            .max(by: { $0.1 < $1.1 })?
+            .0
     }
 
     func monitor() async {
@@ -55,13 +71,25 @@ final class UsageStore {
         await withTaskGroup(of: FetchResult.self) { group in
             for profile in profiles {
                 group.addTask {
+                    let activityOutcome: ActivityOutcome
+                    do {
+                        activityOutcome = .success(try await ActivityReader.latestActivity(for: profile))
+                    } catch {
+                        activityOutcome = .failure(error.localizedDescription)
+                    }
+
                     do {
                         let snapshot = try await client.fetchRateLimits(for: profile)
-                        return FetchResult(profileID: profile.id, outcome: .success(snapshot))
+                        return FetchResult(
+                            profileID: profile.id,
+                            quotaOutcome: .success(snapshot),
+                            activityOutcome: activityOutcome
+                        )
                     } catch {
                         return FetchResult(
                             profileID: profile.id,
-                            outcome: .failure(error.localizedDescription)
+                            quotaOutcome: .failure(error.localizedDescription),
+                            activityOutcome: activityOutcome
                         )
                     }
                 }
@@ -72,12 +100,20 @@ final class UsageStore {
                     continue
                 }
                 statuses[index].isRefreshing = false
-                switch result.outcome {
+                switch result.quotaOutcome {
                 case let .success(snapshot):
                     statuses[index].snapshot = snapshot
                     statuses[index].errorMessage = nil
                 case let .failure(message):
                     statuses[index].errorMessage = message
+                }
+
+                switch result.activityOutcome {
+                case let .success(date):
+                    statuses[index].lastActivity = date
+                    statuses[index].activityErrorMessage = nil
+                case let .failure(message):
+                    statuses[index].activityErrorMessage = message
                 }
             }
         }
@@ -88,10 +124,16 @@ final class UsageStore {
 
 private struct FetchResult: Sendable {
     let profileID: String
-    let outcome: FetchOutcome
+    let quotaOutcome: FetchOutcome
+    let activityOutcome: ActivityOutcome
 }
 
 private enum FetchOutcome: Sendable {
     case success(QuotaSnapshot)
+    case failure(String)
+}
+
+private enum ActivityOutcome: Sendable {
+    case success(Date?)
     case failure(String)
 }
