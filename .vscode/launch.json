@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Codex_Status}",
+      "name": "Debug CodexMeter",
+      "program": "${workspaceFolder:Codex_Status}/.build/debug/CodexMeter",
+      "preLaunchTask": "swift: Build Debug CodexMeter"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:Codex_Status}",
+      "name": "Release CodexMeter",
+      "program": "${workspaceFolder:Codex_Status}/.build/release/CodexMeter",
+      "preLaunchTask": "swift: Build Release CodexMeter"
+    }
+  ]
+}
