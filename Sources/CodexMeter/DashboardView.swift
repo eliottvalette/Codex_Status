@@ -326,7 +326,7 @@ private struct QuotaGauge: View {
         let minutes = totalMinutes % 60
 
         if totalHours >= 48 {
-            return "\(totalHours / 24)d"
+            return "\(totalHours / 24)d \(totalHours % 24)h"
         }
         if totalHours >= 6 {
             return "\(totalHours)h"
