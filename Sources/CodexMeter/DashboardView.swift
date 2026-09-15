@@ -11,7 +11,7 @@ struct DashboardView: View {
             QuadrantGrid(statuses: store.statuses, mostRecentID: store.mostRecentProfileID)
             ControlRow(store: store)
         }
-        .frame(width: 410, height: 470)
+        .frame(width: 533, height: 350)
     }
 }
 
@@ -20,6 +20,24 @@ struct DashboardView: View {
 private struct QuadrantGrid: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
+
+    private var shortResetRanks: [String: Int] {
+        resetRanks { $0.snapshot?.shortWindow?.resetsAt }
+    }
+
+    private var weeklyResetRanks: [String: Int] {
+        resetRanks { $0.snapshot?.weeklyWindow?.resetsAt }
+    }
+
+    private func resetRanks(resetsAt: (ProfileStatus) -> Date?) -> [String: Int] {
+        let sorted = statuses
+            .compactMap { status -> (String, Date)? in
+                guard let date = resetsAt(status) else { return nil }
+                return (status.id, date)
+            }
+            .sorted { $0.1 < $1.1 }
+        return Dictionary(uniqueKeysWithValues: sorted.enumerated().map { ($0.element.0, $0.offset + 1) })
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -38,23 +56,45 @@ private struct QuadrantGrid: View {
     private func quadrantLayout(width: CGFloat, height: CGFloat) -> some View {
         let halfW = width / 2
         let halfH = height / 2
+        let shortRanks = shortResetRanks
+        let weeklyRanks = weeklyResetRanks
 
         if statuses.count >= 4 {
-            AliasQuadrant(status: statuses[0], isMostRecent: statuses[0].id == mostRecentID)
-                .frame(width: halfW, height: halfH)
-                .position(x: halfW / 2, y: halfH / 2)
+            AliasQuadrant(
+                status: statuses[0],
+                isMostRecent: statuses[0].id == mostRecentID,
+                rank5H: shortRanks[statuses[0].id],
+                rankWeek: weeklyRanks[statuses[0].id]
+            )
+            .frame(width: halfW, height: halfH)
+            .position(x: halfW / 2, y: halfH / 2)
 
-            AliasQuadrant(status: statuses[1], isMostRecent: statuses[1].id == mostRecentID)
-                .frame(width: halfW, height: halfH)
-                .position(x: halfW + halfW / 2, y: halfH / 2)
+            AliasQuadrant(
+                status: statuses[1],
+                isMostRecent: statuses[1].id == mostRecentID,
+                rank5H: shortRanks[statuses[1].id],
+                rankWeek: weeklyRanks[statuses[1].id]
+            )
+            .frame(width: halfW, height: halfH)
+            .position(x: halfW + halfW / 2, y: halfH / 2)
 
-            AliasQuadrant(status: statuses[2], isMostRecent: statuses[2].id == mostRecentID)
-                .frame(width: halfW, height: halfH)
-                .position(x: halfW / 2, y: halfH + halfH / 2)
+            AliasQuadrant(
+                status: statuses[2],
+                isMostRecent: statuses[2].id == mostRecentID,
+                rank5H: shortRanks[statuses[2].id],
+                rankWeek: weeklyRanks[statuses[2].id]
+            )
+            .frame(width: halfW, height: halfH)
+            .position(x: halfW / 2, y: halfH + halfH / 2)
 
-            AliasQuadrant(status: statuses[3], isMostRecent: statuses[3].id == mostRecentID)
-                .frame(width: halfW, height: halfH)
-                .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
+            AliasQuadrant(
+                status: statuses[3],
+                isMostRecent: statuses[3].id == mostRecentID,
+                rank5H: shortRanks[statuses[3].id],
+                rankWeek: weeklyRanks[statuses[3].id]
+            )
+            .frame(width: halfW, height: halfH)
+            .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
         }
     }
 
@@ -78,33 +118,30 @@ private struct QuadrantGrid: View {
 private struct AliasQuadrant: View {
     let status: ProfileStatus
     let isMostRecent: Bool
+    let rank5H: Int?
+    let rankWeek: Int?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             aliasHeader
             gaugeRow
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var aliasHeader: some View {
-        HStack(spacing: 5) {
-            if isMostRecent {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 5, height: 5)
-            }
+        HStack(spacing: 4) {
             Text(status.profile.displayName)
-                .font(.system(.subheadline, design: .monospaced))
-                .fontWeight(isMostRecent ? .semibold : .regular)
+                .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
+                .foregroundStyle(isMostRecent ? .primary : .secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
 
             if status.isStale {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption2)
+                    .font(.system(size: 9))
                     .foregroundStyle(.orange)
             }
 
@@ -125,19 +162,33 @@ private struct AliasQuadrant: View {
                 .foregroundStyle(.red)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
+            // Profile has no 5H quota — WEEK gauge takes the full width
+            HStack {
+                Spacer()
+                QuotaGauge(
+                    label: "WEEK",
+                    window: status.snapshot?.weeklyWindow,
+                    diameter: 50,
+                    resetRank: rankWeek
+                )
+                Spacer()
+            }
         } else {
             HStack(spacing: 0) {
                 QuotaGauge(
                     label: "5H",
                     window: status.snapshot?.shortWindow,
-                    diameter: 62
+                    diameter: 50,
+                    resetRank: rank5H
                 )
                 .frame(maxWidth: .infinity)
 
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
-                    diameter: 62
+                    diameter: 50,
+                    resetRank: rankWeek
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -151,9 +202,12 @@ private struct QuotaGauge: View {
     let label: String
     let window: QuotaWindow?
     let diameter: CGFloat
+    let resetRank: Int?
+
+    private var outerDiameter: CGFloat { diameter + 8 }
 
     private var remaining: Double? {
-        window.map { $0.remainingPercent }
+        window?.remainingPercent
     }
 
     private var ringColor: Color {
@@ -164,85 +218,104 @@ private struct QuotaGauge: View {
         return .red
     }
 
+    private func resetFraction(relativeTo now: Date) -> Double {
+        guard let window else { return 0 }
+        let windowSeconds = Double(window.durationMinutes) * 60
+        let timeLeft = max(0, window.resetsAt.timeIntervalSince(now))
+        return min(1, timeLeft / windowSeconds)
+    }
+
+    private func compactCountdown(_ date: Date, relativeTo now: Date) -> String {
+        let seconds = max(0, date.timeIntervalSince(now))
+        let totalMinutes = Int(seconds / 60)
+        let totalHours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+
+        if totalHours >= 48 {
+            return "\(totalHours / 24)d"
+        }
+        if totalHours >= 6 {
+            return "\(totalHours)h"
+        }
+        if totalHours >= 1 {
+            return minutes > 0 ? "\(totalHours)h \(minutes)m" : "\(totalHours)h"
+        }
+        if totalMinutes >= 1 {
+            return "\(totalMinutes)m"
+        }
+        return "<1m"
+    }
+
+    private func circledRank(_ rank: Int) -> String {
+        ["①", "②", "③", "④"].indices.contains(rank - 1) ? ["①", "②", "③", "④"][rank - 1] : "\(rank)."
+    }
+
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 3) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .tracking(1)
 
-            ZStack {
-                Circle()
-                    .stroke(Color.secondary.opacity(0.15), lineWidth: 5)
-                    .frame(width: diameter, height: diameter)
+            if let remaining {
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    VStack(spacing: 3) {
+                        ZStack {
+                            // Outer track — reset proximity
+                            Circle()
+                                .stroke(Color.secondary.opacity(0.18), lineWidth: 3)
+                                .frame(width: outerDiameter, height: outerDiameter)
 
-                if let remaining, window != nil {
-                    Circle()
-                        .trim(from: 0, to: remaining / 100)
-                        .stroke(
-                            ringColor,
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round)
-                        )
-                        .frame(width: diameter, height: diameter)
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.4), value: remaining)
+                            // Outer arc — time remaining until reset (full = far, empty = imminent)
+                            Circle()
+                                .trim(from: 0, to: resetFraction(relativeTo: context.date))
+                                .stroke(
+                                    Color.secondary.opacity(0.5),
+                                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                                )
+                                .frame(width: outerDiameter, height: outerDiameter)
+                                .rotationEffect(.degrees(-90))
+
+                            // Inner track — quota
+                            Circle()
+                                .stroke(Color.secondary.opacity(0.15), lineWidth: 4)
+                                .frame(width: diameter, height: diameter)
+
+                            // Inner arc — remaining quota
+                            Circle()
+                                .trim(from: 0, to: remaining / 100)
+                                .stroke(
+                                    ringColor,
+                                    style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                                )
+                                .frame(width: diameter, height: diameter)
+                                .rotationEffect(.degrees(-90))
+                                .animation(.easeInOut(duration: 0.4), value: remaining)
+
+                            Text("\(Int(remaining.rounded()))%")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(remaining <= 5 ? ringColor : .primary)
+                        }
+                        .frame(width: outerDiameter, height: outerDiameter)
+
+                        HStack(spacing: 2) {
+                            if let rank = resetRank {
+                                Text(circledRank(rank))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(compactCountdown(window!.resetsAt, relativeTo: context.date))
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                    }
                 }
-
-                percentageLabel
-            }
-
-            resetLabel
-        }
-    }
-
-    @ViewBuilder
-    private var percentageLabel: some View {
-        if let remaining {
-            Text("\(Int(remaining.rounded()))%")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(remaining <= 5 ? ringColor : .primary)
-        } else {
-            Text("—")
-                .font(.system(size: 13, weight: .regular, design: .rounded))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder
-    private var resetLabel: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            if let resetsAt = window?.resetsAt {
-                Text(compactCountdown(resetsAt, relativeTo: context.date))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(.secondary)
             } else {
-                Text(" ")
-                    .font(.system(size: 10))
+                Text("—")
+                    .font(.system(size: 13, weight: .light))
+                    .foregroundStyle(.tertiary)
+                    .frame(height: outerDiameter)
             }
         }
-    }
-
-    private func compactCountdown(_ date: Date, relativeTo now: Date) -> String {
-        let seconds = max(0, date.timeIntervalSince(now))
-        let minutes = Int(seconds / 60)
-        let hours = minutes / 60
-        let days = hours / 24
-        let remainingHours = hours % 24
-        let remainingMinutes = minutes % 60
-
-        if days >= 2 {
-            return "\(days)d"
-        }
-        if days == 1 {
-            return remainingHours > 0 ? "\(days)d \(remainingHours)h" : "1d"
-        }
-        if hours >= 1 {
-            return remainingMinutes > 0 ? "\(hours)h \(remainingMinutes)m" : "\(hours)h"
-        }
-        if minutes >= 1 {
-            return "\(minutes)m"
-        }
-        return "<1m"
     }
 }
 
@@ -292,7 +365,6 @@ private struct ControlRow: View {
             .help("Quit (⌘Q)")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
         .frame(height: 24)
     }
 
