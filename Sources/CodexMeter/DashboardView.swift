@@ -21,24 +21,6 @@ private struct QuadrantGrid: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
 
-    private var shortResetRanks: [String: Int] {
-        resetRanks { $0.snapshot?.shortWindow?.resetsAt }
-    }
-
-    private var weeklyResetRanks: [String: Int] {
-        resetRanks { $0.snapshot?.weeklyWindow?.resetsAt }
-    }
-
-    private func resetRanks(resetsAt: (ProfileStatus) -> Date?) -> [String: Int] {
-        let sorted = statuses
-            .compactMap { status -> (String, Date)? in
-                guard let date = resetsAt(status) else { return nil }
-                return (status.id, date)
-            }
-            .sorted { $0.1 < $1.1 }
-        return Dictionary(uniqueKeysWithValues: sorted.enumerated().map { ($0.element.0, $0.offset + 1) })
-    }
-
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -56,33 +38,25 @@ private struct QuadrantGrid: View {
     private func quadrantLayout(width: CGFloat, height: CGFloat) -> some View {
         let halfW = width / 2
         let halfH = height / 2
-        let shortRanks = shortResetRanks
-        let weeklyRanks = weeklyResetRanks
 
         if statuses.count >= 5 {
             AliasQuadrant(
                 status: statuses[0],
-                isMostRecent: statuses[0].id == mostRecentID,
-                rank5H: shortRanks[statuses[0].id],
-                rankWeek: weeklyRanks[statuses[0].id]
+                isMostRecent: statuses[0].id == mostRecentID
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW / 2, y: halfH / 2)
 
             AliasQuadrant(
                 status: statuses[1],
-                isMostRecent: statuses[1].id == mostRecentID,
-                rank5H: shortRanks[statuses[1].id],
-                rankWeek: weeklyRanks[statuses[1].id]
+                isMostRecent: statuses[1].id == mostRecentID
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW + halfW / 2, y: halfH / 2)
 
             AliasQuadrant(
                 status: statuses[2],
-                isMostRecent: statuses[2].id == mostRecentID,
-                rank5H: shortRanks[statuses[2].id],
-                rankWeek: weeklyRanks[statuses[2].id]
+                isMostRecent: statuses[2].id == mostRecentID
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW / 2, y: halfH + halfH / 2)
@@ -91,9 +65,7 @@ private struct QuadrantGrid: View {
                 leftStatus: statuses[3],
                 rightStatus: statuses[4],
                 leftMostRecent: statuses[3].id == mostRecentID,
-                rightMostRecent: statuses[4].id == mostRecentID,
-                leftRankWeek: weeklyRanks[statuses[3].id],
-                rightRankWeek: weeklyRanks[statuses[4].id]
+                rightMostRecent: statuses[4].id == mostRecentID
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
@@ -120,8 +92,6 @@ private struct QuadrantGrid: View {
 private struct AliasQuadrant: View {
     let status: ProfileStatus
     let isMostRecent: Bool
-    let rank5H: Int?
-    let rankWeek: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -171,8 +141,7 @@ private struct AliasQuadrant: View {
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
-                    diameter: diameter,
-                    resetRank: rankWeek
+                    diameter: diameter
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -181,16 +150,14 @@ private struct AliasQuadrant: View {
                 QuotaGauge(
                     label: "5H",
                     window: status.snapshot?.shortWindow,
-                    diameter: 65,
-                    resetRank: rank5H
+                    diameter: 65
                 )
                 .frame(maxWidth: .infinity)
 
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
-                    diameter: 65,
-                    resetRank: rankWeek
+                    diameter: 65
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -205,8 +172,6 @@ private struct SharedWeeklyQuadrant: View {
     let rightStatus: ProfileStatus
     let leftMostRecent: Bool
     let rightMostRecent: Bool
-    let leftRankWeek: Int?
-    let rightRankWeek: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -267,8 +232,7 @@ private struct SharedWeeklyQuadrant: View {
                 QuotaGauge(
                     label: "WEEK",
                     window: leftStatus.snapshot?.weeklyWindow,
-                    diameter: 65,
-                    resetRank: leftRankWeek
+                    diameter: 65
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -283,8 +247,7 @@ private struct SharedWeeklyQuadrant: View {
                 QuotaGauge(
                     label: "WEEK",
                     window: rightStatus.snapshot?.weeklyWindow,
-                    diameter: 65,
-                    resetRank: rightRankWeek
+                    diameter: 65
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -298,7 +261,6 @@ private struct QuotaGauge: View {
     let label: String
     let window: QuotaWindow?
     let diameter: CGFloat
-    let resetRank: Int?
 
     private var outerDiameter: CGFloat { diameter + 8 }
 
@@ -340,9 +302,6 @@ private struct QuotaGauge: View {
         return "<1m"
     }
 
-    private func circledRank(_ rank: Int) -> String {
-        ["①", "②", "③", "④"].indices.contains(rank - 1) ? ["①", "②", "③", "④"][rank - 1] : "\(rank)."
-    }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -392,15 +351,9 @@ private struct QuotaGauge: View {
                         }
                         .frame(width: outerDiameter, height: outerDiameter)
 
-                        HStack(spacing: 2) {
-                            if let rank = resetRank {
-                                Text(circledRank(rank))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            Text(compactCountdown(window!.resetsAt, relativeTo: context.date))
-                                .foregroundStyle(.secondary)
-                        }
-                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        Text(compactCountdown(window!.resetsAt, relativeTo: context.date))
+                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
                     }
                 }
             } else {
