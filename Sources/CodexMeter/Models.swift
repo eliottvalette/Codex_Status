@@ -17,13 +17,48 @@ struct CodexProfile: Identifiable, Hashable, Sendable {
     }()
 }
 
+enum WindowActivityState: String, Equatable, Sendable {
+    case unavailable
+    case unknown
+    case dormant
+    case active
+}
+
 struct QuotaWindow: Equatable, Sendable {
-    let durationMinutes: Int
+    let durationMinutes: Int?
     let usedPercent: Double
-    let resetsAt: Date
+    let resetsAt: Date?
+    var state: WindowActivityState
 
     var remainingPercent: Double {
         max(0, 100 - usedPercent)
+    }
+}
+
+enum WindowClassifier {
+    static func classify(
+        previous: QuotaWindow?,
+        current: QuotaWindow,
+        elapsedSeconds: TimeInterval
+    ) -> WindowActivityState {
+        if current.usedPercent > 0 {
+            return .active
+        }
+        guard let previous, elapsedSeconds >= 3.0 else {
+            return .unknown
+        }
+        guard let currentResetsAt = current.resetsAt, let previousResetsAt = previous.resetsAt else {
+            return .unknown
+        }
+        let resetShift = currentResetsAt.timeIntervalSince(previousResetsAt)
+        if abs(resetShift) <= 1.5 {
+            return .active
+        }
+        let toleranceSeconds = max(2.5, elapsedSeconds * 0.05)
+        if abs(resetShift - elapsedSeconds) <= toleranceSeconds {
+            return .dormant
+        }
+        return .unknown
     }
 }
 

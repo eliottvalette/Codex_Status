@@ -86,14 +86,15 @@ private struct RateLimitBucket: Decodable {
 
 private struct RateLimitWindowPayload: Decodable {
     let usedPercent: Double
-    let windowDurationMins: Int
-    let resetsAt: TimeInterval
+    let windowDurationMins: Int?
+    let resetsAt: TimeInterval?
 
     var model: QuotaWindow {
         QuotaWindow(
             durationMinutes: windowDurationMins,
             usedPercent: usedPercent,
-            resetsAt: Date(timeIntervalSince1970: resetsAt)
+            resetsAt: resetsAt.map { Date(timeIntervalSince1970: $0) },
+            state: usedPercent > 0 ? .active : .unknown
         )
     }
 }

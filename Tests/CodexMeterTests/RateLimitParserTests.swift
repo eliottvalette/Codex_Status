@@ -48,4 +48,17 @@ struct RateLimitParserTests {
         let snapshot = try RateLimitParser.parseResponseLine(Data(notification.utf8))
         #expect(snapshot == nil)
     }
+
+    @Test("Handles nullable resetsAt and windowDurationMins per official protocol")
+    func handlesNullableProtocolFields() throws {
+        let response = #"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":0,"windowDurationMins":null,"resetsAt":null},"secondary":{"usedPercent":10,"windowDurationMins":10080,"resetsAt":null},"planType":"plus"}}}"#
+        let parsedSnapshot = try RateLimitParser.parseResponseLine(Data(response.utf8))
+        let snapshot = try #require(parsedSnapshot)
+
+        #expect(snapshot.shortWindow == nil)
+        #expect(snapshot.weeklyWindow?.usedPercent == 10)
+        #expect(snapshot.weeklyWindow?.resetsAt == nil)
+        #expect(snapshot.weeklyWindow?.durationMinutes == 10080)
+        #expect(snapshot.weeklyWindow?.state == .active)
+    }
 }

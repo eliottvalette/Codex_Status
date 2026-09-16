@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -6,6 +7,7 @@ import Observation
 final class UsageStore {
     private(set) var statuses: [ProfileStatus]
     private(set) var isRefreshing = false
+    private(set) var isActivating = false
 
     private let client: AppServerClient
     private let refreshInterval: Duration
@@ -48,14 +50,26 @@ final class UsageStore {
     }
 
     func monitor() async {
+        await performActivationCycle()
+
+        let wakeTask = Task { [weak self] in
+            let wakeNotifications = NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didWakeNotification)
+            for await _ in wakeNotifications {
+                guard let self else { break }
+                await self.performActivationCycle()
+            }
+        }
+
         while Task.isCancelled == false {
-            await refresh()
             do {
                 try await Task.sleep(for: refreshInterval)
             } catch {
+                wakeTask.cancel()
                 return
             }
+            await refresh()
         }
+        wakeTask.cancel()
     }
 
     func refresh() async {
@@ -101,8 +115,13 @@ final class UsageStore {
                 }
                 statuses[index].isRefreshing = false
                 switch result.quotaOutcome {
-                case let .success(snapshot):
-                    statuses[index].snapshot = snapshot
+                case let .success(newSnapshot):
+                    let previousSnapshot = statuses[index].snapshot
+                    let updatedSnapshot = classifySnapshot(
+                        newSnapshot: newSnapshot,
+                        previousSnapshot: previousSnapshot
+                    )
+                    statuses[index].snapshot = updatedSnapshot
                     statuses[index].errorMessage = nil
                 case let .failure(message):
                     statuses[index].errorMessage = message
@@ -119,6 +138,158 @@ final class UsageStore {
         }
 
         isRefreshing = false
+    }
+
+    func performActivationCycle() async {
+        guard isActivating == false, isRefreshing == false else { return }
+        isActivating = true
+        defer { isActivating = false }
+
+        await refresh()
+
+        let candidateProfiles = statuses.compactMap { status -> (CodexProfile, QuotaSnapshot)? in
+            guard let snapshot = status.snapshot else { return nil }
+            let hasZeroUsageWindow = (snapshot.shortWindow?.usedPercent == 0) || (snapshot.weeklyWindow?.usedPercent == 0)
+            return hasZeroUsageWindow ? (status.profile, snapshot) : nil
+        }
+
+        guard candidateProfiles.isEmpty == false else { return }
+
+        do {
+            try await Task.sleep(for: .seconds(6))
+        } catch {
+            return
+        }
+
+        var dormantProfiles: [CodexProfile] = []
+        for (profile, previousSnapshot) in candidateProfiles {
+            do {
+                let secondSnapshot = try await client.fetchRateLimits(for: profile)
+                let elapsedSeconds = secondSnapshot.fetchedAt.timeIntervalSince(previousSnapshot.fetchedAt)
+
+                let classifiedShortWindow = secondSnapshot.shortWindow.map { currentWindow in
+                    var updated = currentWindow
+                    updated.state = WindowClassifier.classify(
+                        previous: previousSnapshot.shortWindow,
+                        current: currentWindow,
+                        elapsedSeconds: elapsedSeconds
+                    )
+                    return updated
+                }
+
+                let classifiedWeeklyWindow = secondSnapshot.weeklyWindow.map { currentWindow in
+                    var updated = currentWindow
+                    updated.state = WindowClassifier.classify(
+                        previous: previousSnapshot.weeklyWindow,
+                        current: currentWindow,
+                        elapsedSeconds: elapsedSeconds
+                    )
+                    return updated
+                }
+
+                let updatedSnapshot = QuotaSnapshot(
+                    planType: secondSnapshot.planType,
+                    shortWindow: classifiedShortWindow,
+                    weeklyWindow: classifiedWeeklyWindow,
+                    fetchedAt: secondSnapshot.fetchedAt
+                )
+
+                if let profileIndex = statuses.firstIndex(where: { $0.id == profile.id }) {
+                    statuses[profileIndex].snapshot = updatedSnapshot
+                }
+
+                let isDormant = (classifiedShortWindow?.state == .dormant) || (classifiedWeeklyWindow?.state == .dormant)
+                if isDormant {
+                    dormantProfiles.append(profile)
+                }
+            } catch {
+                continue
+            }
+        }
+
+        guard dormantProfiles.isEmpty == false else { return }
+
+        for profile in dormantProfiles {
+            do {
+                try await client.sendActivationTurn(for: profile)
+            } catch {
+                continue
+            }
+
+            do {
+                let verificationFirstSnapshot = try await client.fetchRateLimits(for: profile)
+                try await Task.sleep(for: .seconds(5))
+                let verificationSecondSnapshot = try await client.fetchRateLimits(for: profile)
+                let verificationElapsedSeconds = verificationSecondSnapshot.fetchedAt.timeIntervalSince(verificationFirstSnapshot.fetchedAt)
+
+                let verifiedShortWindow = verificationSecondSnapshot.shortWindow.map { currentWindow in
+                    var updated = currentWindow
+                    updated.state = WindowClassifier.classify(
+                        previous: verificationFirstSnapshot.shortWindow,
+                        current: currentWindow,
+                        elapsedSeconds: verificationElapsedSeconds
+                    )
+                    return updated
+                }
+
+                let verifiedWeeklyWindow = verificationSecondSnapshot.weeklyWindow.map { currentWindow in
+                    var updated = currentWindow
+                    updated.state = WindowClassifier.classify(
+                        previous: verificationFirstSnapshot.weeklyWindow,
+                        current: currentWindow,
+                        elapsedSeconds: verificationElapsedSeconds
+                    )
+                    return updated
+                }
+
+                let verifiedSnapshot = QuotaSnapshot(
+                    planType: verificationSecondSnapshot.planType,
+                    shortWindow: verifiedShortWindow,
+                    weeklyWindow: verifiedWeeklyWindow,
+                    fetchedAt: verificationSecondSnapshot.fetchedAt
+                )
+
+                if let profileIndex = statuses.firstIndex(where: { $0.id == profile.id }) {
+                    statuses[profileIndex].snapshot = verifiedSnapshot
+                }
+            } catch {
+                continue
+            }
+        }
+    }
+
+    private func classifySnapshot(newSnapshot: QuotaSnapshot, previousSnapshot: QuotaSnapshot?) -> QuotaSnapshot {
+        guard let previousSnapshot else {
+            return newSnapshot
+        }
+        let elapsedSeconds = newSnapshot.fetchedAt.timeIntervalSince(previousSnapshot.fetchedAt)
+
+        let updatedShortWindow = newSnapshot.shortWindow.map { currentWindow in
+            var updated = currentWindow
+            updated.state = WindowClassifier.classify(
+                previous: previousSnapshot.shortWindow,
+                current: currentWindow,
+                elapsedSeconds: elapsedSeconds
+            )
+            return updated
+        }
+
+        let updatedWeeklyWindow = newSnapshot.weeklyWindow.map { currentWindow in
+            var updated = currentWindow
+            updated.state = WindowClassifier.classify(
+                previous: previousSnapshot.weeklyWindow,
+                current: currentWindow,
+                elapsedSeconds: elapsedSeconds
+            )
+            return updated
+        }
+
+        return QuotaSnapshot(
+            planType: newSnapshot.planType,
+            shortWindow: updatedShortWindow,
+            weeklyWindow: updatedWeeklyWindow,
+            fetchedAt: newSnapshot.fetchedAt
+        )
     }
 }
 

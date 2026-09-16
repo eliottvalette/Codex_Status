@@ -275,9 +275,14 @@ private struct QuotaGauge: View {
     }
 
     private func resetFraction(relativeTo now: Date) -> Double {
-        guard let window else { return 0 }
-        let windowSeconds = Double(window.durationMinutes) * 60
-        let timeLeft = max(0, window.resetsAt.timeIntervalSince(now))
+        guard let window, let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
+            return 0
+        }
+        if window.state == .dormant {
+            return 1.0
+        }
+        let windowSeconds = Double(durationMinutes) * 60
+        let timeLeft = max(0, resetsAt.timeIntervalSince(now))
         return min(1, timeLeft / windowSeconds)
     }
 
@@ -302,6 +307,29 @@ private struct QuotaGauge: View {
         return "<1m"
     }
 
+    @ViewBuilder
+    private func countdownView(for quotaWindow: QuotaWindow, relativeTo now: Date) -> some View {
+        switch quotaWindow.state {
+        case .dormant:
+            Text("idle")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+        case .active, .unknown:
+            if let resetsAt = quotaWindow.resetsAt {
+                Text(compactCountdown(resetsAt, relativeTo: now))
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+            } else {
+                Text("—")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+            }
+        case .unavailable:
+            Text("—")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+        }
+    }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -310,16 +338,14 @@ private struct QuotaGauge: View {
                 .foregroundStyle(.secondary)
                 .tracking(1)
 
-            if let remaining {
+            if let remaining, let window {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     VStack(spacing: 3) {
                         ZStack {
-                            // Outer track — reset proximity
                             Circle()
                                 .stroke(Color.secondary.opacity(0.18), lineWidth: 4)
                                 .frame(width: outerDiameter, height: outerDiameter)
 
-                            // Outer arc — time remaining until reset (full = far, empty = imminent)
                             Circle()
                                 .trim(from: 0, to: resetFraction(relativeTo: context.date))
                                 .stroke(
@@ -329,12 +355,10 @@ private struct QuotaGauge: View {
                                 .frame(width: outerDiameter, height: outerDiameter)
                                 .rotationEffect(.degrees(-90))
 
-                            // Inner track — quota
                             Circle()
                                 .stroke(Color.secondary.opacity(0.15), lineWidth: 5)
                                 .frame(width: diameter, height: diameter)
 
-                            // Inner arc — remaining quota
                             Circle()
                                 .trim(from: 0, to: remaining / 100)
                                 .stroke(
@@ -351,9 +375,7 @@ private struct QuotaGauge: View {
                         }
                         .frame(width: outerDiameter, height: outerDiameter)
 
-                        Text(compactCountdown(window!.resetsAt, relativeTo: context.date))
-                            .foregroundStyle(.secondary)
-                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        countdownView(for: window, relativeTo: context.date)
                     }
                 }
             } else {
