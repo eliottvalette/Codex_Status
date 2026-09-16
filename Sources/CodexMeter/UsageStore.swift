@@ -192,6 +192,8 @@ final class UsageStore {
                     planType: secondSnapshot.planType,
                     shortWindow: classifiedShortWindow,
                     weeklyWindow: classifiedWeeklyWindow,
+                    availableResetCredits: secondSnapshot.availableResetCredits,
+                    earliestResetCreditExpiresAt: secondSnapshot.earliestResetCreditExpiresAt,
                     fetchedAt: secondSnapshot.fetchedAt
                 )
 
@@ -247,6 +249,8 @@ final class UsageStore {
                     planType: verificationSecondSnapshot.planType,
                     shortWindow: verifiedShortWindow,
                     weeklyWindow: verifiedWeeklyWindow,
+                    availableResetCredits: verificationSecondSnapshot.availableResetCredits,
+                    earliestResetCreditExpiresAt: verificationSecondSnapshot.earliestResetCreditExpiresAt,
                     fetchedAt: verificationSecondSnapshot.fetchedAt
                 )
 
@@ -289,6 +293,8 @@ final class UsageStore {
             planType: newSnapshot.planType,
             shortWindow: updatedShortWindow,
             weeklyWindow: updatedWeeklyWindow,
+            availableResetCredits: newSnapshot.availableResetCredits,
+            earliestResetCreditExpiresAt: newSnapshot.earliestResetCreditExpiresAt,
             fetchedAt: newSnapshot.fetchedAt
         )
     }

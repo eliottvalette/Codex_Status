@@ -66,7 +66,25 @@ struct QuotaSnapshot: Equatable, Sendable {
     let planType: String?
     let shortWindow: QuotaWindow?
     let weeklyWindow: QuotaWindow?
+    let availableResetCredits: Int?
+    let earliestResetCreditExpiresAt: Date?
     let fetchedAt: Date
+
+    init(
+        planType: String?,
+        shortWindow: QuotaWindow?,
+        weeklyWindow: QuotaWindow?,
+        availableResetCredits: Int? = nil,
+        earliestResetCreditExpiresAt: Date? = nil,
+        fetchedAt: Date
+    ) {
+        self.planType = planType
+        self.shortWindow = shortWindow
+        self.weeklyWindow = weeklyWindow
+        self.availableResetCredits = availableResetCredits
+        self.earliestResetCreditExpiresAt = earliestResetCreditExpiresAt
+        self.fetchedAt = fetchedAt
+    }
 }
 
 struct ProfileStatus: Identifiable, Sendable {
@@ -77,9 +95,37 @@ struct ProfileStatus: Identifiable, Sendable {
     var activityErrorMessage: String?
     var isRefreshing: Bool
 
+    init(
+        profile: CodexProfile,
+        snapshot: QuotaSnapshot? = nil,
+        errorMessage: String? = nil,
+        lastActivity: Date? = nil,
+        activityErrorMessage: String? = nil,
+        isRefreshing: Bool = false
+    ) {
+        self.profile = profile
+        self.snapshot = snapshot
+        self.errorMessage = errorMessage
+        self.lastActivity = lastActivity
+        self.activityErrorMessage = activityErrorMessage
+        self.isRefreshing = isRefreshing
+    }
+
     var id: String { profile.id }
 
     var isStale: Bool {
         snapshot != nil && errorMessage != nil
+    }
+
+    func headerTitle(relativeTo now: Date = .now) -> String {
+        guard let availableCredits = snapshot?.availableResetCredits else {
+            return profile.displayName
+        }
+        if availableCredits > 0, let expiresAt = snapshot?.earliestResetCreditExpiresAt {
+            let remainingSeconds = max(0, expiresAt.timeIntervalSince(now))
+            let days = max(0, Int(ceil(remainingSeconds / 86_400)))
+            return "\(profile.displayName) - \(availableCredits) - \(days)d"
+        }
+        return "\(profile.displayName) - \(availableCredits)"
     }
 }

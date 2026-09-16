@@ -61,4 +61,49 @@ struct RateLimitParserTests {
         #expect(snapshot.weeklyWindow?.durationMinutes == 10080)
         #expect(snapshot.weeklyWindow?.state == .active)
     }
+
+    @Test("Parses availableResetCredits and earliest expiration from rateLimitResetCredits")
+    func parsesAvailableResetCreditsAndEarliestExpiration() throws {
+        let response = #"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1789487671},"secondary":null,"planType":"plus"},"rateLimitResetCredits":{"availableCount":2,"credits":[{"status":"available","expiresAt":1789949608},{"status":"available","expiresAt":1791075943}]}}}"#
+        let parsedSnapshot = try RateLimitParser.parseResponseLine(Data(response.utf8))
+        let snapshot = try #require(parsedSnapshot)
+
+        #expect(snapshot.availableResetCredits == 2)
+        #expect(snapshot.earliestResetCreditExpiresAt == Date(timeIntervalSince1970: 1789949608))
+    }
+
+    @Test("Formats profile status header title with credit count and remaining days")
+    func formatsHeaderTitleWithCreditsAndDays() {
+        let profile = CodexProfile(
+            id: "codex",
+            displayName: "codex",
+            homeURL: URL(fileURLWithPath: "/tmp/codex")
+        )
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let statusWithoutSnapshot = ProfileStatus(profile: profile)
+        #expect(statusWithoutSnapshot.headerTitle(relativeTo: now) == "codex")
+
+        let snapshotWithCreditsAndExpiration = QuotaSnapshot(
+            planType: "plus",
+            shortWindow: nil,
+            weeklyWindow: nil,
+            availableResetCredits: 3,
+            earliestResetCreditExpiresAt: now.addingTimeInterval(4.8 * 86_400),
+            fetchedAt: now
+        )
+        var statusWithCredits = ProfileStatus(profile: profile, snapshot: snapshotWithCreditsAndExpiration)
+        #expect(statusWithCredits.headerTitle(relativeTo: now) == "codex - 3 - 5d")
+
+        let snapshotExpired = QuotaSnapshot(
+            planType: "plus",
+            shortWindow: nil,
+            weeklyWindow: nil,
+            availableResetCredits: 1,
+            earliestResetCreditExpiresAt: now.addingTimeInterval(-100),
+            fetchedAt: now
+        )
+        statusWithCredits.snapshot = snapshotExpired
+        #expect(statusWithCredits.headerTitle(relativeTo: now) == "codex - 1 - 0d")
+    }
 }

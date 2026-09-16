@@ -11,7 +11,7 @@ struct DashboardView: View {
             QuadrantGrid(statuses: store.statuses, mostRecentID: store.mostRecentProfileID)
             ControlRow(store: store)
         }
-        .frame(width: 533, height: 350)
+        .frame(width: 640, height: 420)
     }
 }
 
@@ -105,7 +105,7 @@ private struct AliasQuadrant: View {
 
     private var aliasHeader: some View {
         HStack(spacing: 4) {
-            Text(status.profile.displayName)
+            Text(status.headerTitle())
                 .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
                 .foregroundStyle(isMostRecent ? .primary : .secondary)
                 .lineLimit(1)
@@ -137,7 +137,7 @@ private struct AliasQuadrant: View {
         } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
             // Profile has no 5H quota — ring fills available space
             GeometryReader { geo in
-                let diameter = max(50, min(geo.size.width, geo.size.height) - 46)
+                let diameter = max(50, min(84, min(geo.size.width - 16, geo.size.height - 44)))
                 QuotaGauge(
                     label: "WEEK",
                     window: status.snapshot?.weeklyWindow,
@@ -146,20 +146,28 @@ private struct AliasQuadrant: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
-            HStack(spacing: 0) {
-                QuotaGauge(
-                    label: "5H",
-                    window: status.snapshot?.shortWindow,
-                    diameter: 65
-                )
-                .frame(maxWidth: .infinity)
+            GeometryReader { geo in
+                let availableWidthPerGauge = geo.size.width / 2
+                let maxHorizontalDiameter = availableWidthPerGauge - 12
+                let maxVerticalDiameter = geo.size.height - 44
+                let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
-                QuotaGauge(
-                    label: "WEEK",
-                    window: status.snapshot?.weeklyWindow,
-                    diameter: 65
-                )
-                .frame(maxWidth: .infinity)
+                HStack(spacing: 0) {
+                    QuotaGauge(
+                        label: "5H",
+                        window: status.snapshot?.shortWindow,
+                        diameter: diameter
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    QuotaGauge(
+                        label: "WEEK",
+                        window: status.snapshot?.weeklyWindow,
+                        diameter: diameter
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -186,10 +194,11 @@ private struct SharedWeeklyQuadrant: View {
     private var headerRow: some View {
         HStack {
             HStack(spacing: 4) {
-                Text(leftStatus.profile.displayName)
+                Text(leftStatus.headerTitle())
                     .font(.system(size: 11, weight: leftMostRecent ? .semibold : .regular, design: .monospaced))
                     .foregroundStyle(leftMostRecent ? .primary : .secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 if leftStatus.isStale {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9))
@@ -211,46 +220,55 @@ private struct SharedWeeklyQuadrant: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.orange)
                 }
-                Text(rightStatus.profile.displayName)
+                Text(rightStatus.headerTitle())
                     .font(.system(size: 11, weight: rightMostRecent ? .semibold : .regular, design: .monospaced))
                     .foregroundStyle(rightMostRecent ? .primary : .secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
     }
 
     @ViewBuilder
     private var gaugeRow: some View {
-        HStack(spacing: 0) {
-            if let errorMessage = leftStatus.errorMessage, leftStatus.snapshot == nil {
-                Text(errorMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
-            } else {
-                QuotaGauge(
-                    label: "WEEK",
-                    window: leftStatus.snapshot?.weeklyWindow,
-                    diameter: 65
-                )
-                .frame(maxWidth: .infinity)
-            }
+        GeometryReader { geo in
+            let availableWidthPerGauge = geo.size.width / 2
+            let maxHorizontalDiameter = availableWidthPerGauge - 12
+            let maxVerticalDiameter = geo.size.height - 44
+            let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
-            if let errorMessage = rightStatus.errorMessage, rightStatus.snapshot == nil {
-                Text(errorMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
-            } else {
-                QuotaGauge(
-                    label: "WEEK",
-                    window: rightStatus.snapshot?.weeklyWindow,
-                    diameter: 65
-                )
-                .frame(maxWidth: .infinity)
+            HStack(spacing: 0) {
+                if let errorMessage = leftStatus.errorMessage, leftStatus.snapshot == nil {
+                    Text(errorMessage)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    QuotaGauge(
+                        label: "WEEK",
+                        window: leftStatus.snapshot?.weeklyWindow,
+                        diameter: diameter
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if let errorMessage = rightStatus.errorMessage, rightStatus.snapshot == nil {
+                    Text(errorMessage)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    QuotaGauge(
+                        label: "WEEK",
+                        window: rightStatus.snapshot?.weeklyWindow,
+                        diameter: diameter
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -263,6 +281,10 @@ private struct QuotaGauge: View {
     let diameter: CGFloat
 
     private var outerDiameter: CGFloat { diameter + 8 }
+    private var outerLineWidth: CGFloat { 4 }
+    private var innerLineWidth: CGFloat { 5 }
+    private var percentFontSize: CGFloat { 15 }
+    private var labelFontSize: CGFloat { 12 }
 
     private var remaining: Double? {
         window?.remainingPercent
@@ -313,28 +335,28 @@ private struct QuotaGauge: View {
         case .dormant:
             Text("idle")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .font(.system(size: labelFontSize, weight: .regular, design: .monospaced))
         case .active, .unknown:
             if let resetsAt = quotaWindow.resetsAt {
                 Text(compactCountdown(resetsAt, relativeTo: now))
                     .foregroundStyle(.secondary)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(.system(size: labelFontSize, weight: .regular, design: .monospaced))
             } else {
                 Text("—")
                     .foregroundStyle(.secondary)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(.system(size: labelFontSize, weight: .regular, design: .monospaced))
             }
         case .unavailable:
             Text("—")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .font(.system(size: labelFontSize, weight: .regular, design: .monospaced))
         }
     }
 
     var body: some View {
         VStack(spacing: 3) {
             Text(label)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .font(.system(size: labelFontSize, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .tracking(1)
 
@@ -343,34 +365,34 @@ private struct QuotaGauge: View {
                     VStack(spacing: 3) {
                         ZStack {
                             Circle()
-                                .stroke(Color.secondary.opacity(0.18), lineWidth: 4)
+                                .stroke(Color.secondary.opacity(0.18), lineWidth: outerLineWidth)
                                 .frame(width: outerDiameter, height: outerDiameter)
 
                             Circle()
                                 .trim(from: 0, to: resetFraction(relativeTo: context.date))
                                 .stroke(
                                     Color.secondary.opacity(0.5),
-                                    style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                                    style: StrokeStyle(lineWidth: outerLineWidth, lineCap: .round)
                                 )
                                 .frame(width: outerDiameter, height: outerDiameter)
                                 .rotationEffect(.degrees(-90))
 
                             Circle()
-                                .stroke(Color.secondary.opacity(0.15), lineWidth: 5)
+                                .stroke(Color.secondary.opacity(0.15), lineWidth: innerLineWidth)
                                 .frame(width: diameter, height: diameter)
 
                             Circle()
                                 .trim(from: 0, to: remaining / 100)
                                 .stroke(
                                     ringColor,
-                                    style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                                    style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round)
                                 )
                                 .frame(width: diameter, height: diameter)
                                 .rotationEffect(.degrees(-90))
                                 .animation(.easeInOut(duration: 0.4), value: remaining)
 
                             Text("\(Int(remaining.rounded()))%")
-                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .font(.system(size: percentFontSize, weight: .semibold, design: .rounded))
                                 .foregroundStyle(remaining <= 5 ? ringColor : .primary)
                         }
                         .frame(width: outerDiameter, height: outerDiameter)

@@ -63,10 +63,18 @@ enum RateLimitParser {
         }
 
         let windows = [mainBucket.primary, mainBucket.secondary].compactMap { $0 }
+        let availableCredits = response.rateLimitResetCredits?.credits?
+            .filter { $0.status == nil || $0.status == "available" }
+            .compactMap { $0.expiresAt }
+            .map { Date(timeIntervalSince1970: $0) }
+        let earliestExpiration = availableCredits?.min()
+
         return QuotaSnapshot(
             planType: mainBucket.planType,
             shortWindow: windows.first(where: { $0.windowDurationMins == shortWindowMinutes })?.model,
             weeklyWindow: windows.first(where: { $0.windowDurationMins == weeklyWindowMinutes })?.model,
+            availableResetCredits: response.rateLimitResetCredits?.availableCount,
+            earliestResetCreditExpiresAt: earliestExpiration,
             fetchedAt: fetchedAt
         )
     }
@@ -75,6 +83,17 @@ enum RateLimitParser {
 private struct RateLimitsResult: Decodable {
     let rateLimits: RateLimitBucket?
     let rateLimitsByLimitId: [String: RateLimitBucket]?
+    let rateLimitResetCredits: RateLimitResetCreditsPayload?
+}
+
+private struct RateLimitResetCreditsPayload: Decodable {
+    let availableCount: Int?
+    let credits: [RateLimitResetCreditPayload]?
+}
+
+private struct RateLimitResetCreditPayload: Decodable {
+    let status: String?
+    let expiresAt: TimeInterval?
 }
 
 private struct RateLimitBucket: Decodable {
