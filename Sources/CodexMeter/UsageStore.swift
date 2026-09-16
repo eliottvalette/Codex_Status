@@ -50,8 +50,6 @@ final class UsageStore {
     }
 
     func monitor() async {
-        await performActivationCycle()
-
         let wakeTask = Task { [weak self] in
             let wakeNotifications = NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didWakeNotification)
             for await _ in wakeNotifications {
@@ -59,17 +57,20 @@ final class UsageStore {
                 await self.performActivationCycle()
             }
         }
+        defer {
+            wakeTask.cancel()
+        }
+
+        await performActivationCycle()
 
         while Task.isCancelled == false {
             do {
                 try await Task.sleep(for: refreshInterval)
             } catch {
-                wakeTask.cancel()
                 return
             }
             await refresh()
         }
-        wakeTask.cancel()
     }
 
     func refresh() async {

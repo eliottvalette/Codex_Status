@@ -140,14 +140,11 @@ struct AppServerClient: Sendable {
             }
         }
 
-        process.waitUntilExit()
-        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(decoding: stderrData, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        throw AppServerClientError.exitedWithoutResponse(
-            status: process.terminationStatus,
-            stderr: stderr
-        )
+        if Date() >= deadline {
+            throw AppServerClientError.timedOut(timeout)
+        }
+
+        throw collectExitedWithoutResponseError(process: process, errorPipe: errorPipe)
     }
 
     @concurrent
@@ -279,12 +276,34 @@ struct AppServerClient: Sendable {
             }
         }
 
-        process.waitUntilExit()
-        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(decoding: stderrData, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        throw AppServerClientError.exitedWithoutResponse(
-            status: process.terminationStatus,
+        if Date() >= deadline {
+            throw AppServerClientError.timedOut(timeout)
+        }
+
+        throw collectExitedWithoutResponseError(process: process, errorPipe: errorPipe)
+    }
+
+    func collectExitedWithoutResponseError(process: Process, errorPipe: Pipe) -> AppServerClientError {
+        var errorDescriptor = pollfd(
+            fd: errorPipe.fileHandleForReading.fileDescriptor,
+            events: Int16(POLLIN),
+            revents: 0
+        )
+        let pollErrorResult = Darwin.poll(&errorDescriptor, 1, 0)
+        let stderr: String
+        if pollErrorResult > 0 && (errorDescriptor.revents & Int16(POLLIN)) != 0 {
+            let errorChunk = try? PipeReader.readAvailableBytes(
+                from: errorPipe.fileHandleForReading.fileDescriptor,
+                maximumCount: 16_384
+            )
+            stderr = errorChunk.map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        } else {
+            stderr = ""
+        }
+
+        let terminationStatus = process.isRunning ? -1 : process.terminationStatus
+        return AppServerClientError.exitedWithoutResponse(
+            status: terminationStatus,
             stderr: stderr
         )
     }
