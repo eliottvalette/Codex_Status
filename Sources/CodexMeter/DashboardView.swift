@@ -8,10 +8,19 @@ struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            QuadrantGrid(statuses: store.statuses, mostRecentID: store.mostRecentProfileID)
+            QuadrantGrid(
+                statuses: store.statuses,
+                mostRecentID: store.mostRecentProfileID,
+                onProfileRightClick: { profileID in
+                    Task { await store.handleProfileTap(profileID) }
+                }
+            )
             ControlRow(store: store)
         }
         .frame(width: 640, height: 420)
+        .onExitCommand {
+            store.cancelTransferSelection()
+        }
     }
 }
 
@@ -20,6 +29,7 @@ struct DashboardView: View {
 private struct QuadrantGrid: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
+    let onProfileRightClick: (String) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -42,21 +52,24 @@ private struct QuadrantGrid: View {
         if statuses.count >= 5 {
             AliasQuadrant(
                 status: statuses[0],
-                isMostRecent: statuses[0].id == mostRecentID
+                isMostRecent: statuses[0].id == mostRecentID,
+                onRightClick: onProfileRightClick
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW / 2, y: halfH / 2)
 
             AliasQuadrant(
                 status: statuses[1],
-                isMostRecent: statuses[1].id == mostRecentID
+                isMostRecent: statuses[1].id == mostRecentID,
+                onRightClick: onProfileRightClick
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW + halfW / 2, y: halfH / 2)
 
             AliasQuadrant(
                 status: statuses[2],
-                isMostRecent: statuses[2].id == mostRecentID
+                isMostRecent: statuses[2].id == mostRecentID,
+                onRightClick: onProfileRightClick
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW / 2, y: halfH + halfH / 2)
@@ -65,7 +78,8 @@ private struct QuadrantGrid: View {
                 leftStatus: statuses[3],
                 rightStatus: statuses[4],
                 leftMostRecent: statuses[3].id == mostRecentID,
-                rightMostRecent: statuses[4].id == mostRecentID
+                rightMostRecent: statuses[4].id == mostRecentID,
+                onRightClick: onProfileRightClick
             )
             .frame(width: halfW, height: halfH)
             .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
@@ -92,6 +106,7 @@ private struct QuadrantGrid: View {
 private struct AliasQuadrant: View {
     let status: ProfileStatus
     let isMostRecent: Bool
+    let onRightClick: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -101,6 +116,12 @@ private struct AliasQuadrant: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay {
+            ProfileTransferOverlay(
+                profileID: status.id,
+                onRightClick: onRightClick
+            )
+        }
     }
 
     private var aliasHeader: some View {
@@ -180,6 +201,7 @@ private struct SharedWeeklyQuadrant: View {
     let rightStatus: ProfileStatus
     let leftMostRecent: Bool
     let rightMostRecent: Bool
+    let onRightClick: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -189,6 +211,18 @@ private struct SharedWeeklyQuadrant: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay {
+            HStack(spacing: 0) {
+                ProfileTransferOverlay(
+                    profileID: leftStatus.id,
+                    onRightClick: onRightClick
+                )
+                ProfileTransferOverlay(
+                    profileID: rightStatus.id,
+                    onRightClick: onRightClick
+                )
+            }
+        }
     }
 
     private var headerRow: some View {
@@ -269,6 +303,41 @@ private struct SharedWeeklyQuadrant: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private struct ProfileTransferOverlay: NSViewRepresentable {
+    let profileID: String
+    let onRightClick: (String) -> Void
+
+    func makeNSView(context: Context) -> RightClickView {
+        RightClickView {
+            onRightClick(profileID)
+        }
+    }
+
+    func updateNSView(_ nsView: RightClickView, context: Context) {
+        nsView.action = {
+            onRightClick(profileID)
+        }
+    }
+
+    final class RightClickView: NSView {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("RightClickView does not support NSCoder initialization.")
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            action()
         }
     }
 }
@@ -432,6 +501,13 @@ private struct ControlRow: View {
                 }
             }
 
+            if let transferStatus {
+                Text(transferStatus)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .lineLimit(1)
+            }
+
             Spacer()
 
             Button {
@@ -457,6 +533,19 @@ private struct ControlRow: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 24)
+    }
+
+    private var transferStatus: String? {
+        if let feedback = store.transferFeedback {
+            return feedback.message
+        }
+        guard
+            let sourceID = store.transferSourceID,
+            let source = store.statuses.first(where: { $0.id == sourceID })?.profile
+        else {
+            return nil
+        }
+        return "3 conversations de \(source.displayName) → clic droit sur la destination"
     }
 
     private func updatedLabel(_ date: Date, relativeTo now: Date) -> String {

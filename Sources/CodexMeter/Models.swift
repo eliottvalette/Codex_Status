@@ -129,3 +129,14 @@ struct ProfileStatus: Identifiable, Sendable {
         return "\(profile.displayName) - \(availableCredits)"
     }
 }
+
+struct TransferFeedback: Equatable, Sendable {
+    enum Style: Equatable, Sendable {
+        case progress
+        case success
+        case failure
+    }
+
+    let style: Style
+    let message: String
+}

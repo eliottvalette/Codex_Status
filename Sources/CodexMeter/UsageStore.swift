@@ -8,14 +8,20 @@ final class UsageStore {
     private(set) var statuses: [ProfileStatus]
     private(set) var isRefreshing = false
     private(set) var isActivating = false
+    private(set) var transferSourceID: String?
+    private(set) var transferDestinationID: String?
+    private(set) var transferFeedback: TransferFeedback?
     private var hasPendingActivationCycle = false
+    private var feedbackClearTask: Task<Void, Never>?
 
     private let client: AppServerClient
+    private let transferService: SessionTransferService
     private let refreshInterval: Duration
 
     init(
         profiles: [CodexProfile] = CodexProfile.configured,
         client: AppServerClient = AppServerClient(),
+        transferService: SessionTransferService = SessionTransferService(),
         refreshInterval: Duration = .seconds(120)
     ) {
         statuses = profiles.map {
@@ -29,7 +35,97 @@ final class UsageStore {
             )
         }
         self.client = client
+        self.transferService = transferService
         self.refreshInterval = refreshInterval
+    }
+
+    var isTransferring: Bool {
+        transferDestinationID != nil
+    }
+
+    func cancelTransferSelection() {
+        guard isTransferring == false else { return }
+        transferSourceID = nil
+        transferFeedback = nil
+    }
+
+    func handleProfileTap(_ profileID: String) async {
+        guard isTransferring == false else { return }
+        guard let tappedProfile = statuses.first(where: { $0.id == profileID })?.profile else {
+            transferFeedback = TransferFeedback(
+                style: .failure,
+                message: "Compte inconnu : \(profileID)"
+            )
+            return
+        }
+
+        guard let sourceID = transferSourceID else {
+            feedbackClearTask?.cancel()
+            transferFeedback = nil
+            transferSourceID = tappedProfile.id
+            return
+        }
+
+        if sourceID == tappedProfile.id {
+            transferSourceID = nil
+            transferFeedback = nil
+            return
+        }
+
+        guard let sourceProfile = statuses.first(where: { $0.id == sourceID })?.profile else {
+            transferSourceID = nil
+            transferFeedback = TransferFeedback(
+                style: .failure,
+                message: "Compte source introuvable : \(sourceID)"
+            )
+            return
+        }
+
+        transferDestinationID = tappedProfile.id
+        transferFeedback = TransferFeedback(
+            style: .progress,
+            message: "Copie vers \(tappedProfile.displayName)…"
+        )
+
+        do {
+            let result = try await transferService.transferRecentSessions(
+                from: sourceProfile,
+                to: tappedProfile
+            )
+            transferSourceID = nil
+            transferDestinationID = nil
+
+            let message: String
+            if result.alreadyPresentCount == 0 {
+                message = "✓ \(result.sessionCount) conversations copiées vers \(tappedProfile.displayName)"
+            } else if result.copiedCount == 0 {
+                message = "✓ \(result.sessionCount) conversations déjà présentes sur \(tappedProfile.displayName)"
+            } else {
+                let copiedLabel = result.copiedCount == 1 ? "copiée" : "copiées"
+                let existingLabel = result.alreadyPresentCount == 1
+                    ? "déjà présente"
+                    : "déjà présentes"
+                message = "✓ \(result.copiedCount) \(copiedLabel), \(result.alreadyPresentCount) \(existingLabel)"
+            }
+            transferFeedback = TransferFeedback(style: .success, message: message)
+            scheduleFeedbackClear()
+        } catch {
+            transferSourceID = nil
+            transferDestinationID = nil
+            transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
+        }
+    }
+
+    private func scheduleFeedbackClear() {
+        feedbackClearTask?.cancel()
+        feedbackClearTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(3))
+            } catch {
+                return
+            }
+            self?.transferFeedback = nil
+        }
     }
 
     var lowestRemainingPercent: Int? {
