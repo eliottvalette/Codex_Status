@@ -54,7 +54,7 @@ final class UsageStore {
         guard let tappedProfile = statuses.first(where: { $0.id == profileID })?.profile else {
             transferFeedback = TransferFeedback(
                 style: .failure,
-                message: "Compte inconnu : \(profileID)"
+                message: "Unknown account: \(profileID)"
             )
             return
         }
@@ -76,7 +76,7 @@ final class UsageStore {
             transferSourceID = nil
             transferFeedback = TransferFeedback(
                 style: .failure,
-                message: "Compte source introuvable : \(sourceID)"
+                message: "Source account not found: \(sourceID)"
             )
             return
         }
@@ -84,7 +84,7 @@ final class UsageStore {
         transferDestinationID = tappedProfile.id
         transferFeedback = TransferFeedback(
             style: .progress,
-            message: "Copie vers \(tappedProfile.displayName)…"
+            message: "Copying to \(tappedProfile.displayName)…"
         )
 
         do {
@@ -96,16 +96,14 @@ final class UsageStore {
             transferDestinationID = nil
 
             let message: String
+            let sessionLabel = result.sessionCount == 1 ? "conversation" : "conversations"
             if result.alreadyPresentCount == 0 {
-                message = "✓ \(result.sessionCount) conversations copiées vers \(tappedProfile.displayName)"
+                message = "✓ \(result.sessionCount) \(sessionLabel) copied to \(tappedProfile.displayName)"
             } else if result.copiedCount == 0 {
-                message = "✓ \(result.sessionCount) conversations déjà présentes sur \(tappedProfile.displayName)"
+                message = "✓ \(result.sessionCount) \(sessionLabel) already present on \(tappedProfile.displayName)"
             } else {
-                let copiedLabel = result.copiedCount == 1 ? "copiée" : "copiées"
-                let existingLabel = result.alreadyPresentCount == 1
-                    ? "déjà présente"
-                    : "déjà présentes"
-                message = "✓ \(result.copiedCount) \(copiedLabel), \(result.alreadyPresentCount) \(existingLabel)"
+                let copiedLabel = result.copiedCount == 1 ? "conversation copied" : "conversations copied"
+                message = "✓ \(result.copiedCount) \(copiedLabel), \(result.alreadyPresentCount) already present"
             }
             transferFeedback = TransferFeedback(style: .success, message: message)
             scheduleFeedbackClear()

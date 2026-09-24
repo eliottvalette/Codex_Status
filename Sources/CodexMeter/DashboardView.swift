@@ -545,7 +545,7 @@ private struct ControlRow: View {
         else {
             return nil
         }
-        return "3 conversations de \(source.displayName) → clic droit sur la destination"
+        return "3 conversations from \(source.displayName) → right-click the destination"
     }
 
     private func updatedLabel(_ date: Date, relativeTo now: Date) -> String {

@@ -35,13 +35,14 @@ right-click another profile to copy the source profile's three most recently
 used, non-archived parent conversations. Right-click the source again or press
 Escape to cancel. Transfer state is shown only as a compact footer message.
 
-CodexMeter validates every JSONL rollout before copying it, recursively includes
-the source rollouts required by forked conversation history, never overwrites a
-different destination history, and accepts a destination conversation that has
-already continued from the exported history. After copying, it asks Codex App
-Server to rebuild the destination history index so the conversations and their
-previews are immediately available in `/resume`. A transfer failure remains
-visible in the overlay instead of silently falling back.
+CodexMeter validates every JSONL rollout before copying it and recursively
+includes the source rollouts required by forked conversation history. A
+conversation already present at the destination is left untouched and skipped,
+even when its history has diverged; the other conversations in the batch still
+transfer. After copying, CodexMeter asks Codex App Server to index only the new
+conversations so they and their previews are immediately available in
+`/resume`. A transfer failure remains visible in the overlay instead of
+silently falling back.
 
 If a refresh fails, the exact error is shown. A previous successful result may
 remain visible, but it is explicitly marked stale.
