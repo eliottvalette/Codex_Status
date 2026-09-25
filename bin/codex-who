@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+
+"""Show recent Codex conversations for the current directory."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+LIMIT = 10
+COLORS = ("\033[36m", "\033[35m", "\033[32m", "\033[33m", "\033[34m")
+RESET = "\033[0m"
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+@dataclass(frozen=True)
+class Conversation:
+    profile: str
+    last_message_at: float
+    title: str
+
+
+def profiles(home: Path) -> list[tuple[str, Path]]:
+    found = [
+        (directory.name.lstrip("."), directory / "state_5.sqlite")
+        for directory in home.glob(".codex*")
+        if directory.is_dir() and (directory / "state_5.sqlite").is_file()
+    ]
+    if not found:
+        raise RuntimeError(f"No Codex profile databases found under {home}.")
+    return sorted(found)
+
+
+def last_user_message_at(rollout_path: Path) -> float | None:
+    last_timestamp = None
+    try:
+        with rollout_path.open(encoding="utf-8") as rollout:
+            for line_number, line in enumerate(rollout, start=1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(
+                        f"Invalid JSON in {rollout_path} on line {line_number}: {error}"
+                    ) from error
+                payload = record.get("payload", {})
+                if (
+                    record.get("type") != "response_item"
+                    or payload.get("type") != "message"
+                    or payload.get("role") != "user"
+                ):
+                    continue
+                timestamp = record.get("timestamp")
+                if not isinstance(timestamp, str):
+                    raise RuntimeError(
+                        f"Missing user-message timestamp in {rollout_path} on line {line_number}."
+                    )
+                try:
+                    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError as error:
+                    raise RuntimeError(
+                        f"Invalid user-message timestamp in {rollout_path} on line {line_number}: {timestamp}"
+                    ) from error
+                if parsed.tzinfo is None:
+                    raise RuntimeError(
+                        f"User-message timestamp has no timezone in {rollout_path} on line {line_number}: {timestamp}"
+                    )
+                observed_at = parsed.timestamp()
+                last_timestamp = observed_at if last_timestamp is None else max(last_timestamp, observed_at)
+    except OSError as error:
+        raise RuntimeError(f"Could not read {rollout_path}: {error}") from error
+    return last_timestamp
+
+
+def recent_conversations(profile: str, database: Path, cwd: Path) -> list[Conversation]:
+    uri = f"{database.resolve().as_uri()}?mode=rw"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            rows = connection.execute(
+                """
+                SELECT rollout_path,
+                       COALESCE(NULLIF(name, ''), NULLIF(title, ''),
+                                NULLIF(preview, ''), '[untitled]')
+                FROM threads
+                WHERE cwd = ?
+                  AND archived = 0
+                  AND agent_path IS NULL
+                  AND source NOT LIKE '{"subagent"%'
+                """,
+                (str(cwd),),
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise RuntimeError(f"Could not read {database}: {error}") from error
+
+    conversations = []
+    profile_home = database.parent.resolve()
+    for rollout_path, title in rows:
+        path = Path(rollout_path).resolve()
+        if not path.is_relative_to(profile_home):
+            raise RuntimeError(f"Rollout path is outside {profile_home}: {path}")
+        timestamp = last_user_message_at(path)
+        if timestamp is not None:
+            conversations.append(Conversation(profile, timestamp, title))
+    return conversations
+
+
+def age_label(last_message_at: float, now: float) -> str:
+    elapsed = max(0, int(now - last_message_at))
+    if elapsed < 60:
+        return "now"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m"
+    if elapsed < 86400:
+        return f"{elapsed // 3600}h"
+    return f"{elapsed // 86400}d {(elapsed % 86400) // 3600}h"
+
+
+def safe_title(value: str) -> str:
+    return " ".join(CONTROL_CHARACTERS.sub(" ", value).split())
+
+
+def main() -> int:
+    cwd = Path.cwd().resolve()
+    conversations = [
+        conversation
+        for profile, database in profiles(Path.home())
+        for conversation in recent_conversations(profile, database, cwd)
+    ]
+    conversations.sort(key=lambda item: item.last_message_at, reverse=True)
+    selected = conversations[:LIMIT]
+    if not selected:
+        print(f"No Codex conversations found for {cwd}.")
+        return 0
+
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    palette = {
+        profile: COLORS[index % len(COLORS)]
+        for index, profile in enumerate(sorted({item.profile for item in selected}))
+    }
+    label_width = max(len(item.profile) for item in selected)
+    now = time.time()
+    for item in selected:
+        label = item.profile.ljust(label_width)
+        line = f"{label}  {age_label(item.last_message_at, now):>6}  {safe_title(item.title)}"
+        if use_color:
+            line = f"{palette[item.profile]}{line}{RESET}"
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError) as error:
+        print(f"codex-who: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

@@ -64,6 +64,22 @@ open dist/CodexMeter.app
 The generated app has no Dock window. Click the gauge in the menu bar to see
 all profiles. It refreshes at launch, every two minutes, and on demand.
 
+## Recent conversations in the terminal
+
+From this repository's root, install the command into a directory on your `PATH`:
+
+```bash
+ln -s "$(pwd)/bin/codex-who" "$HOME/.local/bin/codex-who"
+```
+
+Run `codex-who` from a project directory. It makes read-only queries against
+each local `.codex*` profile's `state_5.sqlite` database and shows up to ten
+non-archived parent conversations whose saved working directory exactly
+matches the current directory. The age is time since the last user message in
+the conversation's local rollout log, so merely reopening a conversation does
+not make it appear recent. Entire rows are colored when output goes to a
+terminal; `NO_COLOR` disables color.
+
 For development, `swift run CodexMeter` also works, but running the packaged
 app is recommended because its `Info.plist` enables menu-bar-only behavior.
 
