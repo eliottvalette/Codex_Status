@@ -262,6 +262,84 @@ struct SessionTransferServiceTests {
         #expect(sessions.first?.name == "One")
     }
 
+    @Test("Repairs an existing segmented conversation whose ancestors are not database rows")
+    func repairsSegmentedHistory() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = CodexProfile(id: "source", displayName: "source", homeURL: directory.appending(path: "source"))
+        let destination = CodexProfile(id: "destination", displayName: "destination", homeURL: directory.appending(path: "destination"))
+        let folder = "sessions/2026/09/28"
+        let filenames = ["rollout-root.jsonl", "rollout-root_middle.jsonl", "rollout-root_leaf.jsonl"]
+        try FileManager.default.createDirectory(at: source.homeURL.appending(path: folder), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination.homeURL.appending(path: folder), withIntermediateDirectories: true)
+        let rootData = rolloutData(threadID: "root")
+        let middleData = segmentedRollout(threadID: "root", base: "root")
+        let leafData = segmentedRollout(threadID: "root", base: "middle")
+        for (filename, data) in zip(filenames, [rootData, middleData, leafData]) {
+            try data.write(to: source.homeURL.appending(path: "\(folder)/\(filename)"))
+        }
+        let existingURL = destination.homeURL.appending(path: "\(folder)/\(filenames[2])")
+        try leafData.write(to: existingURL)
+        let leaf = SessionTransferService.SessionRecord(
+            id: "root", rolloutPath: source.homeURL.appending(path: "\(folder)/\(filenames[2])").path, name: "Segmented"
+        )
+        let prepared = try SessionTransferService.prepareTransferClosure(
+            selected: [leaf], available: [leaf], from: source, to: destination
+        )
+        #expect(prepared.map { $0.destinationURL.lastPathComponent } == filenames)
+        #expect(prepared.map(\.disposition) == [.copy, .copy, .alreadyPresent])
+        #expect(SessionTransferService.sessionsRequiringIndex(prepared) == [leaf])
+        #expect(try SessionTransferService.commit(prepared) == 2)
+        #expect(try Data(contentsOf: existingURL) == leafData)
+        let repeated = try SessionTransferService.prepareTransferClosure(
+            selected: [leaf], available: [leaf], from: source, to: destination
+        )
+        #expect(try SessionTransferService.commit(repeated) == 0)
+        #expect(SessionTransferService.sessionsRequiringIndex(repeated).isEmpty)
+    }
+
+    @Test("Rejects missing, ambiguous, and cyclic paginated history before copying", arguments: ["missing", "ambiguous", "cycle"])
+    func rejectsInvalidSegmentDependencies(kind: String) throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = CodexProfile(id: "source", displayName: "source", homeURL: directory.appending(path: "source"))
+        let destination = CodexProfile(id: "destination", displayName: "destination", homeURL: directory.appending(path: "destination"))
+        let folder = source.homeURL.appending(path: "sessions")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let leafURL = folder.appending(path: "rollout-root_leaf.jsonl")
+        try segmentedRollout(threadID: "root", base: "parent").write(to: leafURL)
+        if kind == "ambiguous" {
+            try rolloutData(threadID: "root").write(to: folder.appending(path: "rollout-a_parent.jsonl"))
+            try rolloutData(threadID: "root").write(to: folder.appending(path: "rollout-b_parent.jsonl"))
+        } else if kind == "cycle" {
+            try segmentedRollout(threadID: "root", base: "leaf").write(to: folder.appending(path: "rollout-root_parent.jsonl"))
+        }
+        let leaf = SessionTransferService.SessionRecord(id: "root", rolloutPath: leafURL.path, name: nil)
+        #expect {
+            try SessionTransferService.prepareTransferClosure(selected: [leaf], available: [leaf], from: source, to: destination)
+        } throws: { error in
+            switch (kind, error) {
+            case ("missing", SessionTransferError.missingLineageSource): true
+            case ("ambiguous", SessionTransferError.ambiguousLineageSource): true
+            case ("cycle", SessionTransferError.lineageCycle): true
+            default: false
+            }
+        }
+        #expect(FileManager.default.fileExists(atPath: destination.homeURL.path) == false)
+    }
+
+    @Test("Rejects malformed history_base metadata instead of omitting its dependency")
+    func rejectsMalformedHistoryBase() {
+        let data = Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"root\",\"history_base\":{}}}\n".utf8)
+        #expect(throws: SessionTransferError.self) {
+            try SessionTransferService.validateRollout(data, threadID: "root")
+        }
+    }
+
+    private func segmentedRollout(threadID: String, base: String) -> Data {
+        Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(threadID)\",\"session_id\":\"\(threadID)\",\"history_mode\":\"paginated\",\"history_base\":{\"thread_id\":\"\(base)\",\"end_ordinal_exclusive\":2,\"end_byte_offset\":100}}}\n".utf8)
+    }
+
     private func rolloutData(
         threadID: String,
         marker: String = "source",

@@ -20,6 +20,8 @@ enum SessionTransferError: Error, LocalizedError {
     case invalidRollout(threadID: String, line: Int)
     case mismatchedThreadIdentifier(expected: String)
     case missingLineageSource(threadID: String, sourceThreadID: String)
+    case ambiguousLineageSource(String)
+    case invalidHistoryBase(String)
     case lineageCycle(threadID: String)
     case copyFailed(threadID: String, reason: String)
     case missingCodexExecutable(URL)
@@ -47,6 +49,10 @@ enum SessionTransferError: Error, LocalizedError {
             "The rollout metadata does not identify the expected conversation \(expected)."
         case let .missingLineageSource(threadID, sourceThreadID):
             "Conversation \(threadID) depends on missing source rollout \(sourceThreadID)."
+        case let .ambiguousLineageSource(identifier):
+            "Multiple source rollouts match history segment \(identifier)."
+        case let .invalidHistoryBase(identifier):
+            "Conversation \(identifier) has invalid history_base metadata."
         case let .lineageCycle(threadID):
             "Conversation history contains a lineage cycle at \(threadID)."
         case let .copyFailed(threadID, reason):
@@ -101,13 +107,11 @@ struct SessionTransferService: Sendable {
             from: source,
             to: destination
         )
-        let selectedIDs = Set(sessions.map(\.id))
+        let selectedPaths = Set(sessions.map(\.rolloutPath))
         let copiedCount = prepared.count {
-            selectedIDs.contains($0.session.id) && $0.disposition == .copy
+            selectedPaths.contains($0.session.rolloutPath) && $0.requiresIndex
         }
-        let copiedSessions = prepared.compactMap { transfer in
-            transfer.disposition == .copy ? transfer.session : nil
-        }
+        let copiedSessions = Self.sessionsRequiringIndex(prepared)
         _ = try Self.commit(prepared)
 
         if copiedSessions.isEmpty == false {
@@ -147,6 +151,7 @@ extension SessionTransferService {
     struct RolloutMetadata: Equatable {
         let threadID: String
         let sourceThreadID: String?
+        var historyBaseThreadID: String? = nil
     }
 
     struct PreparedTransfer {
@@ -155,6 +160,8 @@ extension SessionTransferService {
         let destinationURL: URL
         let disposition: DestinationDisposition
         let sourceThreadID: String?
+        var historyBaseThreadID: String? = nil
+        var requiresIndex = false
     }
 
     static func recentSessions(for profile: CodexProfile, limit: Int) throws -> [SessionRecord] {
@@ -204,36 +211,106 @@ extension SessionTransferService {
         to destination: CodexProfile
     ) throws -> [PreparedTransfer] {
         let recordsByID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
-        var preparedByID: [String: PreparedTransfer] = [:]
+        var preparedByPath: [String: PreparedTransfer] = [:]
         var visiting: Set<String> = []
         var ordered: [PreparedTransfer] = []
 
-        func prepareWithAncestors(_ session: SessionRecord) throws {
-            guard preparedByID[session.id] == nil else { return }
-            guard visiting.insert(session.id).inserted else {
+        var rolloutURLs: [URL]?
+
+        func historySegment(_ identifier: String, for session: SessionRecord) throws -> SessionRecord {
+            if rolloutURLs == nil {
+                rolloutURLs = try sourceRolloutURLs(in: source)
+            }
+            let matches = (rolloutURLs ?? []).filter {
+                let name = $0.lastPathComponent
+                return name.hasSuffix("-\(identifier).jsonl") || name.hasSuffix("_\(identifier).jsonl")
+            }
+            guard matches.count <= 1 else {
+                throw SessionTransferError.ambiguousLineageSource(identifier)
+            }
+            guard let url = matches.first else {
+                throw SessionTransferError.missingLineageSource(
+                    threadID: session.id, sourceThreadID: identifier
+                )
+            }
+            let data = try Data(contentsOf: url)
+            guard let firstLine = data.split(separator: 0x0A).first,
+                  let object = try JSONSerialization.jsonObject(with: Data(firstLine)) as? [String: Any],
+                  object["type"] as? String == "session_meta",
+                  let payload = object["payload"] as? [String: Any],
+                  let threadID = payload["id"] as? String else {
+                throw SessionTransferError.mismatchedThreadIdentifier(expected: identifier)
+            }
+            return SessionRecord(id: threadID, rolloutPath: url.path, name: recordsByID[threadID]?.name)
+        }
+
+        @discardableResult
+        func prepareWithAncestors(_ session: SessionRecord) throws -> Bool {
+            let path = URL(fileURLWithPath: session.rolloutPath).standardizedFileURL.path
+            if let cached = preparedByPath[path] { return cached.requiresIndex }
+            guard visiting.insert(path).inserted else {
                 throw SessionTransferError.lineageCycle(threadID: session.id)
             }
-            defer { visiting.remove(session.id) }
+            defer { visiting.remove(path) }
 
-            let transfer = try prepareTransfer(session, from: source, to: destination)
-            if let sourceThreadID = transfer.sourceThreadID {
+            var transfer = try prepareTransfer(session, from: source, to: destination)
+            transfer.requiresIndex = transfer.disposition == .copy
+            if let segmentID = transfer.historyBaseThreadID {
+                let segment = try historySegment(segmentID, for: session)
+                let dependencyChanged = try prepareWithAncestors(segment)
+                transfer.requiresIndex = transfer.requiresIndex || dependencyChanged
+            } else if let sourceThreadID = transfer.sourceThreadID {
                 guard let sourceSession = recordsByID[sourceThreadID] else {
                     throw SessionTransferError.missingLineageSource(
                         threadID: session.id,
                         sourceThreadID: sourceThreadID
                     )
                 }
-                try prepareWithAncestors(sourceSession)
+                let dependencyChanged = try prepareWithAncestors(sourceSession)
+                transfer.requiresIndex = transfer.requiresIndex || dependencyChanged
             }
 
-            preparedByID[session.id] = transfer
+            preparedByPath[path] = transfer
             ordered.append(transfer)
+            return transfer.requiresIndex
         }
 
         for session in selected {
             try prepareWithAncestors(session)
         }
         return ordered
+    }
+
+    static func sessionsRequiringIndex(_ prepared: [PreparedTransfer]) -> [SessionRecord] {
+        var seen: Set<String> = []
+        return prepared.reversed().compactMap { transfer in
+            guard transfer.requiresIndex, seen.insert(transfer.session.id).inserted else { return nil }
+            return transfer.session
+        }.reversed()
+    }
+
+    private static func sourceRolloutURLs(in profile: CodexProfile) throws -> [URL] {
+        var urls: [URL] = []
+        for folder in ["sessions", "archived_sessions"] {
+            let root = profile.homeURL.appending(path: folder)
+            guard FileManager.default.fileExists(atPath: root.path) else { continue }
+            var enumerationError: Error?
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles],
+                errorHandler: { _, error in enumerationError = error; return false }
+            ) else {
+                throw SessionTransferError.unreadableRollout(threadID: root.path, reason: "Cannot enumerate rollouts.")
+            }
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    urls.append(url)
+                }
+            }
+            if let enumerationError { throw enumerationError }
+        }
+        return urls
     }
 
     static func prepareTransfer(
@@ -269,7 +346,8 @@ extension SessionTransferService {
             sourceData: data,
             destinationURL: destinationURL,
             disposition: disposition,
-            sourceThreadID: metadata.sourceThreadID
+            sourceThreadID: metadata.sourceThreadID,
+            historyBaseThreadID: metadata.historyBaseThreadID
         )
     }
 
@@ -301,9 +379,19 @@ extension SessionTransferService {
                 throw SessionTransferError.mismatchedThreadIdentifier(expected: threadID)
             }
             if metadata == nil {
+                var historyBaseThreadID: String?
+                if let historyBase = payload["history_base"], !(historyBase is NSNull) {
+                    guard let base = historyBase as? [String: Any],
+                          let identifier = base["thread_id"] as? String,
+                          identifier.isEmpty == false else {
+                        throw SessionTransferError.invalidHistoryBase(threadID)
+                    }
+                    historyBaseThreadID = identifier
+                }
                 metadata = RolloutMetadata(
                     threadID: metadataThreadID,
-                    sourceThreadID: payload["forked_from_id"] as? String
+                    sourceThreadID: payload["forked_from_id"] as? String,
+                    historyBaseThreadID: historyBaseThreadID
                 )
             }
         }

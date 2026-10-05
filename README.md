@@ -36,11 +36,14 @@ used, non-archived parent conversations. Right-click the source again or press
 Escape to cancel. Transfer state is shown only as a compact footer message.
 
 CodexMeter validates every JSONL rollout before copying it and recursively
-includes the source rollouts required by forked conversation history. A
+includes the source rollouts required by forked and paginated conversation
+history (`forked_from_id` and `history_base.thread_id`). History segments are
+resolved from rollout files, including segments absent from the thread index. A
 conversation already present at the destination is left untouched and skipped,
 even when its history has diverged; the other conversations in the batch still
-transfer. After copying, CodexMeter asks Codex App Server to index only the new
-conversations so they and their previews are immediately available in
+transfer. Missing history segments are copied even when the final rollout is
+already present. After copying, CodexMeter asks Codex App Server to index new
+or repaired conversations so they and their previews are immediately available in
 `/resume`. A transfer failure remains visible in the overlay instead of
 silently falling back.
 

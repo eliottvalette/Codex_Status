@@ -119,6 +119,7 @@ private struct AliasQuadrant: View {
         .overlay {
             ProfileTransferOverlay(
                 profileID: status.id,
+                isEnabled: status.errorMessage == nil || status.snapshot != nil,
                 onRightClick: onRightClick
             )
         }
@@ -149,12 +150,13 @@ private struct AliasQuadrant: View {
 
     @ViewBuilder
     private var gaugeRow: some View {
-        if let errorMessage = status.errorMessage, status.snapshot == nil {
-            Text(errorMessage)
-                .font(.caption2)
-                .foregroundStyle(.red)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
+        if status.errorMessage != nil, status.snapshot == nil {
+            GeometryReader { geo in
+                let diameter = max(50, min(78, min(geo.size.width / 2 - 12, geo.size.height - 44)))
+                QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityLabel("Account unavailable")
+            }
         } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
             // Profile has no 5H quota — ring fills available space
             GeometryReader { geo in
@@ -215,10 +217,12 @@ private struct SharedWeeklyQuadrant: View {
             HStack(spacing: 0) {
                 ProfileTransferOverlay(
                     profileID: leftStatus.id,
+                    isEnabled: leftStatus.errorMessage == nil || leftStatus.snapshot != nil,
                     onRightClick: onRightClick
                 )
                 ProfileTransferOverlay(
                     profileID: rightStatus.id,
+                    isEnabled: rightStatus.errorMessage == nil || rightStatus.snapshot != nil,
                     onRightClick: onRightClick
                 )
             }
@@ -272,35 +276,19 @@ private struct SharedWeeklyQuadrant: View {
             let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
             HStack(spacing: 0) {
-                if let errorMessage = leftStatus.errorMessage, leftStatus.snapshot == nil {
-                    Text(errorMessage)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    QuotaGauge(
-                        label: "WEEK",
-                        window: leftStatus.snapshot?.weeklyWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                QuotaGauge(
+                    label: "WEEK",
+                    window: leftStatus.snapshot?.weeklyWindow,
+                    diameter: diameter
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if let errorMessage = rightStatus.errorMessage, rightStatus.snapshot == nil {
-                    Text(errorMessage)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    QuotaGauge(
-                        label: "WEEK",
-                        window: rightStatus.snapshot?.weeklyWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                QuotaGauge(
+                    label: "WEEK",
+                    window: rightStatus.snapshot?.weeklyWindow,
+                    diameter: diameter
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -309,17 +297,18 @@ private struct SharedWeeklyQuadrant: View {
 
 private struct ProfileTransferOverlay: NSViewRepresentable {
     let profileID: String
+    let isEnabled: Bool
     let onRightClick: (String) -> Void
 
     func makeNSView(context: Context) -> RightClickView {
         RightClickView {
-            onRightClick(profileID)
+            if isEnabled { onRightClick(profileID) }
         }
     }
 
     func updateNSView(_ nsView: RightClickView, context: Context) {
         nsView.action = {
-            onRightClick(profileID)
+            if isEnabled { onRightClick(profileID) }
         }
     }
 
@@ -470,10 +459,17 @@ private struct QuotaGauge: View {
                     }
                 }
             } else {
-                Text("—")
-                    .font(.system(size: 13, weight: .light))
-                    .foregroundStyle(.tertiary)
-                    .frame(height: outerDiameter)
+                VStack(spacing: 3) {
+                    Circle()
+                        .stroke(Color.gray.opacity(0.4), lineWidth: innerLineWidth)
+                        .frame(width: diameter, height: diameter)
+                        .frame(width: outerDiameter, height: outerDiameter)
+                    Text("—")
+                        .font(.system(size: labelFontSize, weight: .regular, design: .monospaced))
+                        .hidden()
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Quota unavailable")
             }
         }
     }
