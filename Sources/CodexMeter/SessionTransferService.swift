@@ -434,9 +434,13 @@ extension SessionTransferService {
         var latest: Date?
         for line in data.split(separator: 0x0A) {
             guard let object = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  object["type"] as? String == "event_msg",
-                  let payload = object["payload"] as? [String: Any],
-                  payload["type"] as? String == "user_message" else { continue }
+                  let payload = object["payload"] as? [String: Any] else { continue }
+            let isUserEvent = object["type"] as? String == "event_msg"
+                && payload["type"] as? String == "user_message"
+            let isUserMessage = object["type"] as? String == "response_item"
+                && payload["type"] as? String == "message"
+                && payload["role"] as? String == "user"
+            guard isUserEvent || isUserMessage else { continue }
             guard let timestamp = object["timestamp"] as? String else { continue }
             guard let date = fractional.date(from: timestamp) ?? standard.date(from: timestamp) else {
                 throw ActivityReaderError.invalidTimestamp(timestamp)

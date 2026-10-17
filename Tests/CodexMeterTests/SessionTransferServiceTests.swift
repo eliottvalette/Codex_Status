@@ -175,6 +175,20 @@ struct SessionTransferServiceTests {
         #expect(try Data(contentsOf: originalURL) == original)
     }
 
+    @Test("Compares current response-item user messages", arguments: [true, false])
+    func comparesResponseItemRequests(sourceNewer: Bool) throws {
+        func data(_ timestamp: String) -> Data {
+            Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\"}}\n{\"timestamp\":\"\(timestamp)\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}\n".utf8)
+        }
+        let older = data("2026-10-16T10:00:00Z")
+        let newer = data("2026-10-17T10:00:00.123Z")
+        #expect(try SessionTransferService.destinationDisposition(
+            sourceData: sourceNewer ? newer : older,
+            destinationData: sourceNewer ? older : newer,
+            threadID: "thread-1"
+        ) == (sourceNewer ? .replace : .alreadyPresent))
+    }
+
     @Test("Copies a rollout to the matching destination-relative path")
     func copiesToMatchingRelativePath() throws {
         let directory = try temporaryDirectory()
