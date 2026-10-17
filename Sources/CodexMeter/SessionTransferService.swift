@@ -145,6 +145,7 @@ extension SessionTransferService {
 
     enum DestinationDisposition: Equatable {
         case copy
+        case replace
         case alreadyPresent
     }
 
@@ -162,6 +163,7 @@ extension SessionTransferService {
         let sourceThreadID: String?
         var historyBaseThreadID: String? = nil
         var requiresIndex = false
+        var destinationData: Data? = nil
     }
 
     static func recentSessions(for profile: CodexProfile, limit: Int) throws -> [SessionRecord] {
@@ -254,7 +256,7 @@ extension SessionTransferService {
             defer { visiting.remove(path) }
 
             var transfer = try prepareTransfer(session, from: source, to: destination)
-            transfer.requiresIndex = transfer.disposition == .copy
+            transfer.requiresIndex = transfer.disposition != .alreadyPresent
             if let segmentID = transfer.historyBaseThreadID {
                 let segment = try historySegment(segmentID, for: session)
                 let dependencyChanged = try prepareWithAncestors(segment)
@@ -340,14 +342,19 @@ extension SessionTransferService {
         }
 
         let metadata = try validateRollout(data, threadID: session.id)
-        let disposition = destinationDisposition(at: destinationURL)
+        let destinationData = FileManager.default.fileExists(atPath: destinationURL.path)
+            ? try Data(contentsOf: destinationURL) : nil
+        let disposition = try destinationDisposition(
+            sourceData: data, destinationData: destinationData, threadID: session.id
+        )
         return PreparedTransfer(
             session: session,
             sourceData: data,
             destinationURL: destinationURL,
             disposition: disposition,
             sourceThreadID: metadata.sourceThreadID,
-            historyBaseThreadID: metadata.historyBaseThreadID
+            historyBaseThreadID: metadata.historyBaseThreadID,
+            destinationData: destinationData
         )
     }
 
@@ -402,16 +409,47 @@ extension SessionTransferService {
         return metadata
     }
 
-    static func destinationDisposition(at destinationURL: URL) -> DestinationDisposition {
-        FileManager.default.fileExists(atPath: destinationURL.path)
-            ? .alreadyPresent
-            : .copy
+    static func destinationDisposition(
+        sourceData: Data,
+        destinationData: Data?,
+        threadID: String
+    ) throws -> DestinationDisposition {
+        guard let destinationData else { return .copy }
+        try validateRollout(destinationData, threadID: threadID)
+        guard sourceData != destinationData else { return .alreadyPresent }
+        if sourceData.starts(with: destinationData) { return .replace }
+        if destinationData.starts(with: sourceData) { return .alreadyPresent }
+        let sourceDate = try latestUserRequest(in: sourceData)
+        let destinationDate = try latestUserRequest(in: destinationData)
+        if let sourceDate, destinationDate == nil || sourceDate > destinationDate! {
+            return .replace
+        }
+        return .alreadyPresent
+    }
+
+    private static func latestUserRequest(in data: Data) throws -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let standard = ISO8601DateFormatter()
+        var latest: Date?
+        for line in data.split(separator: 0x0A) {
+            guard let object = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "user_message" else { continue }
+            guard let timestamp = object["timestamp"] as? String else { continue }
+            guard let date = fractional.date(from: timestamp) ?? standard.date(from: timestamp) else {
+                throw ActivityReaderError.invalidTimestamp(timestamp)
+            }
+            if latest == nil || date > latest! { latest = date }
+        }
+        return latest
     }
 
     static func commit(_ prepared: [PreparedTransfer]) throws -> Int {
-        var createdURLs: [URL] = []
+        var committed: [PreparedTransfer] = []
         do {
-            for transfer in prepared where transfer.disposition == .copy {
+            for transfer in prepared where transfer.disposition != .alreadyPresent {
                 let directoryURL = transfer.destinationURL.deletingLastPathComponent()
                 try FileManager.default.createDirectory(
                     at: directoryURL,
@@ -428,8 +466,22 @@ extension SessionTransferService {
                         [.posixPermissions: 0o600],
                         ofItemAtPath: temporaryURL.path
                     )
-                    try FileManager.default.moveItem(at: temporaryURL, to: transfer.destinationURL)
-                    createdURLs.append(transfer.destinationURL)
+                    if transfer.disposition == .replace {
+                        guard try Data(contentsOf: transfer.destinationURL) == transfer.destinationData else {
+                            throw SessionTransferError.copyFailed(
+                                threadID: transfer.session.id,
+                                reason: "Destination changed during transfer. Retry the transfer."
+                            )
+                        }
+                        guard Darwin.rename(temporaryURL.path, transfer.destinationURL.path) == 0 else {
+                            throw SessionTransferError.copyFailed(
+                                threadID: transfer.session.id, reason: String(cString: strerror(errno))
+                            )
+                        }
+                    } else {
+                        try FileManager.default.moveItem(at: temporaryURL, to: transfer.destinationURL)
+                    }
+                    committed.append(transfer)
                 } catch {
                     try? FileManager.default.removeItem(at: temporaryURL)
                     throw SessionTransferError.copyFailed(
@@ -439,12 +491,23 @@ extension SessionTransferService {
                 }
             }
         } catch {
-            for url in createdURLs {
-                try? FileManager.default.removeItem(at: url)
+            for transfer in committed.reversed() {
+                do {
+                    if let original = transfer.destinationData {
+                        try original.write(to: transfer.destinationURL, options: .atomic)
+                    } else {
+                        try FileManager.default.removeItem(at: transfer.destinationURL)
+                    }
+                } catch {
+                    throw SessionTransferError.copyFailed(
+                        threadID: transfer.session.id,
+                        reason: "Transfer rollback failed: \(error.localizedDescription)"
+                    )
+                }
             }
             throw error
         }
-        return createdURLs.count
+        return committed.count
     }
 }
 

@@ -38,10 +38,10 @@ Escape to cancel. Transfer state is shown only as a compact footer message.
 CodexMeter validates every JSONL rollout before copying it and recursively
 includes the source rollouts required by forked and paginated conversation
 history (`forked_from_id` and `history_base.thread_id`). History segments are
-resolved from rollout files, including segments absent from the thread index. A
-conversation already present at the destination is left untouched and skipped,
-even when its history has diverged; the other conversations in the batch still
-transfer. Missing history segments are copied even when the final rollout is
+resolved from rollout files, including segments absent from the thread index. An existing conversation is atomically replaced when the source extends its
+history or has a more recent user request. Identical conversations and newer
+destination conversations are skipped. Divergent histories are compared using
+user request timestamps, never file modification times. Missing history segments are copied even when the final rollout is
 already present. After copying, CodexMeter asks Codex App Server to index new
 or repaired conversations so they and their previews are immediately available in
 `/resume`. A transfer failure remains visible in the overlay instead of

@@ -34,13 +34,19 @@ struct SessionTransferServiceTests {
 
         try source.write(to: destination)
         #expect(
-            SessionTransferService.destinationDisposition(at: destination) == .alreadyPresent
+            try SessionTransferService.destinationDisposition(
+                sourceData: rolloutData(threadID: "thread-1"),
+                destinationData: Data(contentsOf: destination), threadID: "thread-1"
+            ) == .alreadyPresent
         )
 
         try (source + Data(#"{"type":"event_msg","payload":{"type":"user_message"}}"#.utf8) + Data([0x0A]))
             .write(to: destination)
         #expect(
-            SessionTransferService.destinationDisposition(at: destination) == .alreadyPresent
+            try SessionTransferService.destinationDisposition(
+                sourceData: rolloutData(threadID: "thread-1"),
+                destinationData: Data(contentsOf: destination), threadID: "thread-1"
+            ) == .alreadyPresent
         )
     }
 
@@ -52,7 +58,10 @@ struct SessionTransferServiceTests {
         try rolloutData(threadID: "thread-1", marker: "destination").write(to: destination)
 
         #expect(
-            SessionTransferService.destinationDisposition(at: destination) == .alreadyPresent
+            try SessionTransferService.destinationDisposition(
+                sourceData: rolloutData(threadID: "thread-1"),
+                destinationData: Data(contentsOf: destination), threadID: "thread-1"
+            ) == .alreadyPresent
         )
         #expect(try Data(contentsOf: destination) == rolloutData(
             threadID: "thread-1",
@@ -79,14 +88,17 @@ struct SessionTransferServiceTests {
                 session: .init(id: "existing", rolloutPath: "/source/existing.jsonl", name: nil),
                 sourceData: rolloutData(threadID: "existing", marker: "source"),
                 destinationURL: existingURL,
-                disposition: SessionTransferService.destinationDisposition(at: existingURL),
+                disposition: try SessionTransferService.destinationDisposition(
+                    sourceData: rolloutData(threadID: "existing", marker: "source"),
+                    destinationData: existingData, threadID: "existing"
+                ),
                 sourceThreadID: nil
             ),
             SessionTransferService.PreparedTransfer(
                 session: .init(id: "missing", rolloutPath: "/source/missing.jsonl", name: nil),
                 sourceData: rolloutData(threadID: "missing"),
                 destinationURL: missingURL,
-                disposition: SessionTransferService.destinationDisposition(at: missingURL),
+                disposition: .copy,
                 sourceThreadID: nil
             ),
         ]
@@ -94,6 +106,73 @@ struct SessionTransferServiceTests {
         #expect(try SessionTransferService.commit(prepared) == 1)
         #expect(try Data(contentsOf: existingURL) == existingData)
         #expect(try Data(contentsOf: missingURL) == rolloutData(threadID: "missing"))
+    }
+
+    @Test("Round-trip transfer replaces the original and indexes the continued conversation")
+    func replacesOlderConversationOnReturn() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let a = CodexProfile(id: "a", displayName: "a", homeURL: directory.appending(path: "a"))
+        let b = CodexProfile(id: "b", displayName: "b", homeURL: directory.appending(path: "b"))
+        let relative = "sessions/rollout-thread-1.jsonl"
+        let originalURL = a.homeURL.appending(path: relative)
+        try FileManager.default.createDirectory(at: originalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = rolloutData(threadID: "thread-1")
+        try original.write(to: originalURL)
+        let first = SessionTransferService.SessionRecord(id: "thread-1", rolloutPath: originalURL.path, name: nil)
+        let outgoing = try SessionTransferService.prepareTransferClosure(selected: [first], available: [first], from: a, to: b)
+        #expect(try SessionTransferService.commit(outgoing) == 1)
+        let continued = original + Data("{\"timestamp\":\"2026-10-17T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Continue\"}}\n".utf8)
+        let bURL = b.homeURL.appending(path: relative)
+        try continued.write(to: bURL)
+        let returning = SessionTransferService.SessionRecord(id: "thread-1", rolloutPath: bURL.path, name: nil)
+        let incoming = try SessionTransferService.prepareTransferClosure(selected: [returning], available: [returning], from: b, to: a)
+        #expect(incoming.map(\.disposition) == [.replace])
+        #expect(SessionTransferService.sessionsRequiringIndex(incoming) == [returning])
+        #expect(try SessionTransferService.commit(incoming) == 1)
+        #expect(try Data(contentsOf: originalURL) == continued)
+        #expect(try SessionTransferService.commit(SessionTransferService.prepareTransferClosure(selected: [first], available: [first], from: a, to: b)) == 0)
+    }
+
+    @Test("Divergent conversations follow user request recency rather than file size", arguments: [true, false])
+    func comparesDivergentRequestTimestamps(sourceNewer: Bool) throws {
+        func data(_ date: String, _ message: String) -> Data {
+            rolloutData(threadID: "thread-1") + Data("{\"timestamp\":\"\(date)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"\(message)\"}}\n".utf8)
+        }
+        let older = data("2026-10-16T10:00:00.000Z", String(repeating: "long", count: 100))
+        let newer = data("2026-10-17T10:00:00Z", "new")
+        #expect(try SessionTransferService.destinationDisposition(
+            sourceData: sourceNewer ? newer : older,
+            destinationData: sourceNewer ? older : newer,
+            threadID: "thread-1"
+        ) == (sourceNewer ? .replace : .alreadyPresent))
+    }
+
+    @Test("Restores a replaced conversation when a later copy fails")
+    func rollsBackReplacement() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let originalURL = directory.appending(path: "original.jsonl")
+        let original = rolloutData(threadID: "thread-1")
+        try original.write(to: originalURL)
+        let blockingFile = directory.appending(path: "blocked")
+        try Data("file".utf8).write(to: blockingFile)
+        let replacement = SessionTransferService.PreparedTransfer(
+            session: .init(id: "thread-1", rolloutPath: "/source/rollout.jsonl", name: nil),
+            sourceData: original + Data("{}\n".utf8),
+            destinationURL: originalURL, disposition: .replace,
+            sourceThreadID: nil, destinationData: original
+        )
+        let failing = SessionTransferService.PreparedTransfer(
+            session: .init(id: "thread-2", rolloutPath: "/source/other.jsonl", name: nil),
+            sourceData: rolloutData(threadID: "thread-2"),
+            destinationURL: blockingFile.appending(path: "other.jsonl"),
+            disposition: .copy, sourceThreadID: nil
+        )
+        #expect(throws: (any Error).self) {
+            try SessionTransferService.commit([replacement, failing])
+        }
+        #expect(try Data(contentsOf: originalURL) == original)
     }
 
     @Test("Copies a rollout to the matching destination-relative path")
