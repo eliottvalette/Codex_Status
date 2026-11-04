@@ -52,15 +52,7 @@ final class UsageStore {
 
     func paceValues(relativeTo now: Date) -> [PaceValue] {
         guard paceError == nil else { return [] }
-        var current: [String: WeeklyObservation] = [:]
-        for status in statuses {
-            guard status.errorMessage == nil,
-                  let snapshot = status.snapshot,
-                  now.timeIntervalSince(snapshot.fetchedAt) <= 600,
-                  let observation = UsagePace.observation(snapshot)
-            else { return [] }
-            current[status.id] = observation
-        }
+        let current = UsagePace.currentObservations(statuses, now: now)
         return UsagePace.values(history: paceHistory, current: current, now: now)
     }
 

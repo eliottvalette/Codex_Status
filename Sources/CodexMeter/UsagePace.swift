@@ -24,14 +24,28 @@ enum UsagePace {
         guard let window = snapshot.weeklyWindow,
               let reset = window.resetsAt,
               let plan = snapshot.planType?.lowercased(),
-              ["pro", "plus"].contains(plan),
+              ["pro", "prolite", "plus"].contains(plan),
               window.usedPercent.isFinite,
               (0...100).contains(window.usedPercent)
         else { return nil }
         return WeeklyObservation(
             date: snapshot.fetchedAt, used: window.usedPercent / 100,
-            reset: reset, capacity: plan == "pro" ? 10 : 1
+            reset: reset, capacity: plan == "plus" ? 1 : 10
         )
+    }
+
+    static func currentObservations(_ statuses: [ProfileStatus], now: Date) -> [String: WeeklyObservation] {
+        var current: [String: WeeklyObservation] = [:]
+        for status in statuses {
+            guard status.errorMessage == nil,
+                  let snapshot = status.snapshot,
+                  now.timeIntervalSince(snapshot.fetchedAt) <= 600,
+                  let observation = observation(snapshot),
+                  observation.reset > now
+            else { continue }
+            current[status.id] = observation
+        }
+        return current
     }
 
     // Spend the capacity that expires first before drawing on later-resetting accounts.
