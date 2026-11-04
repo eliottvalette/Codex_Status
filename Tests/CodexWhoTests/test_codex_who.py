@@ -17,6 +17,48 @@ COMMAND = Path(__file__).resolve().parents[2] / "bin" / "codex-who"
 
 
 class CodexWhoTests(unittest.TestCase):
+    def test_missing_rollout_is_excluded_without_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            profile = root / ".codex"
+            profile.mkdir()
+            missing = profile / "missing.jsonl"
+            readable = profile / "readable.jsonl"
+            readable.write_text(json.dumps({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user"},
+            }) + "\n")
+            with sqlite3.connect(profile / "state_5.sqlite") as database:
+                database.execute("""CREATE TABLE threads (
+                    cwd TEXT, name TEXT, title TEXT, preview TEXT,
+                    archived INTEGER, agent_path TEXT, source TEXT, rollout_path TEXT
+                )""")
+                for path in (missing, readable):
+                    database.execute(
+                        "INSERT INTO threads VALUES (?, NULL, ?, '', 0, NULL, 'cli', ?)",
+                        (str(root), path.stem, str(path)),
+                    )
+
+            result = subprocess.run(
+                [str(COMMAND)], cwd=root,
+                env={**os.environ, "HOME": str(root), "NO_COLOR": "1"},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("readable", result.stdout)
+            self.assertNotIn("missing", result.stdout)
+            self.assertEqual(result.stderr, "")
+
+            readable.write_text("invalid JSON\n")
+            result = subprocess.run(
+                [str(COMMAND)], cwd=root,
+                env={**os.environ, "HOME": str(root), "NO_COLOR": "1"},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Invalid JSON", result.stderr)
+
     def test_merges_profiles_and_filters_to_the_current_project(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory).resolve()

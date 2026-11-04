@@ -373,6 +373,9 @@ private struct QuotaGauge: View {
         let minutes = totalMinutes % 60
 
         if totalHours >= 48 {
+            return "\(totalHours / 24)d"
+        }
+        if totalHours >= 24 {
             return "\(totalHours / 24)d \(totalHours % 24)h"
         }
         if totalHours >= 6 {
@@ -491,10 +494,24 @@ private struct ControlRow: View {
         HStack(spacing: 6) {
             if let fetchedAt = oldestFetchedAt {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    Text(updatedLabel(fetchedAt, relativeTo: context.date))
+                    let values = store.paceValues(relativeTo: context.date)
+                    Text(([updatedLabel(fetchedAt, relativeTo: context.date)] + values.map(\.label))
+                        .joined(separator: " · "))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(values.map { value in
+                            let hours = Int(value.coverage / 3_600)
+                            let minutes = Int(value.coverage / 60) % 60
+                            return "\(hours)h \(minutes)m / \(value.days)d"
+                        }.joined(separator: " · "))
                 }
+            }
+
+            if let error = store.paceError {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .help(error)
             }
 
             if let transferStatus {

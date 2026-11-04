@@ -82,6 +82,8 @@ matches the current directory. The age is time since the last user message in
 the conversation's local rollout log, so merely reopening a conversation does
 not make it appear recent. Entire rows are colored when output goes to a
 terminal; `NO_COLOR` disables color.
+Missing indexed rollout files are excluded from the listing without warnings.
+Other read errors and malformed rollout records remain fatal.
 
 For development, `swift run CodexMeter` also works, but running the packaged
 app is recommended because its `Info.plist` enables menu-bar-only behavior.

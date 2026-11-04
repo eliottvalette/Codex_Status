@@ -75,6 +75,8 @@ def last_user_message_at(rollout_path: Path) -> float | None:
                     )
                 observed_at = parsed.timestamp()
                 last_timestamp = observed_at if last_timestamp is None else max(last_timestamp, observed_at)
+    except FileNotFoundError:
+        raise
     except OSError as error:
         raise RuntimeError(f"Could not read {rollout_path}: {error}") from error
     return last_timestamp
@@ -107,7 +109,10 @@ def recent_conversations(profile: str, database: Path, cwd: Path) -> list[Conver
         path = Path(rollout_path).resolve()
         if not path.is_relative_to(profile_home):
             raise RuntimeError(f"Rollout path is outside {profile_home}: {path}")
-        timestamp = last_user_message_at(path)
+        try:
+            timestamp = last_user_message_at(path)
+        except FileNotFoundError:
+            continue
         if timestamp is not None:
             conversations.append(Conversation(profile, timestamp, title))
     return conversations
