@@ -72,6 +72,48 @@ struct UsagePaceTests {
         #expect(abs(values[0].coverage - UsagePace.day / 2) < 1)
     }
 
+    @Test("Checkpoints ignore refreshes inside the fixed two-minute interval")
+    func fixedCheckpoints() {
+        let observations = [240.0, 230, 120, 115, 0].map { secondsAgo in
+            WeeklyObservation(
+                date: now.addingTimeInterval(-secondsAgo), used: 0.5,
+                reset: now.addingTimeInterval(UsagePace.week), capacity: 1
+            )
+        }
+        let checkpoints = UsagePace.checkpoints(observations)
+        #expect(checkpoints.map(\.date) == [240.0, 120, 0].map { now.addingTimeInterval(-$0) })
+    }
+
+    @Test("Two-second reset timestamp shifts do not recount the used quota")
+    func resetTimestampJitter() {
+        let first = sample(0.5, used: 0.93)
+        let middle = sample(0.25, used: 0.96)
+        let shifted = WeeklyObservation(
+            date: middle.date, used: middle.used,
+            reset: middle.reset.addingTimeInterval(2), capacity: 1
+        )
+        let latest = sample(0, used: 0.96)
+        let baseline = UsagePace.values(
+            history: ["a": [first, middle, latest]], current: ["a": latest], now: now
+        )
+        let jittered = UsagePace.values(
+            history: ["a": [first, shifted, latest]], current: ["a": latest], now: now
+        )
+        #expect(jittered.count == 2)
+        #expect(jittered.map(\.percent) == baseline.map(\.percent))
+    }
+
+    @Test("An early quota reset is counted when usage restarts in a new cycle")
+    func earlyReset() {
+        let first = sample(0.5, used: 0.9, resetIn: 2)
+        let latest = sample(0, used: 0.1, resetIn: 7)
+        let values = UsagePace.values(
+            history: ["a": [first, latest]], current: ["a": latest], now: now
+        )
+        #expect(values.count == 2)
+        #expect(values.allSatisfy { $0.percent > 0 && $0.estimated })
+    }
+
     @Test("Rolling windows diverge after three days")
     func rollingWindows() {
         let latest = sample(0, used: 0.5)

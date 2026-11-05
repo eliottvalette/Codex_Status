@@ -59,7 +59,9 @@ final class UsageStore {
     private func recordPace(_ snapshot: QuotaSnapshot, profileID: String) {
         guard paceError == nil, let observation = UsagePace.observation(snapshot) else { return }
         var samples = paceHistory[profileID, default: []]
-        guard samples.last.map({ observation.date > $0.date }) ?? true else { return }
+        guard samples.last.map({
+            observation.date.timeIntervalSince($0.date) >= UsagePace.checkpointInterval
+        }) ?? true else { return }
         samples.append(observation)
         let cutoff = observation.date.addingTimeInterval(-7 * UsagePace.day)
         // Retain the preceding sample so a rolling-window boundary can be interpolated.

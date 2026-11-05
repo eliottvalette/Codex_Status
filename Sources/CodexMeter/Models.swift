@@ -123,6 +123,10 @@ struct ProfileStatus: Identifiable, Sendable {
         }
         if availableCredits > 0, let expiresAt = snapshot?.earliestResetCreditExpiresAt {
             let remainingSeconds = max(0, expiresAt.timeIntervalSince(now))
+            if remainingSeconds < 2 * 86_400 {
+                let hours = Int(remainingSeconds / 3_600)
+                return "\(profile.displayName) - \(availableCredits) - \(hours / 24)d \(hours % 24)h"
+            }
             let days = max(0, Int(ceil(remainingSeconds / 86_400)))
             return "\(profile.displayName) - \(availableCredits) - \(days)d"
         }

@@ -95,6 +95,9 @@ struct RateLimitParserTests {
         var statusWithCredits = ProfileStatus(profile: profile, snapshot: snapshotWithCreditsAndExpiration)
         #expect(statusWithCredits.headerTitle(relativeTo: now) == "codex - 3 - 5d")
 
+        #expect(statusWithCredits.headerTitle(relativeTo: now.addingTimeInterval(3 * 86_400)) == "codex - 3 - 1d 19h")
+        #expect(statusWithCredits.headerTitle(relativeTo: now.addingTimeInterval(2.8 * 86_400)) == "codex - 3 - 2d")
+
         let snapshotExpired = QuotaSnapshot(
             planType: "plus",
             shortWindow: nil,
@@ -104,6 +107,6 @@ struct RateLimitParserTests {
             fetchedAt: now
         )
         statusWithCredits.snapshot = snapshotExpired
-        #expect(statusWithCredits.headerTitle(relativeTo: now) == "codex - 1 - 0d")
+        #expect(statusWithCredits.headerTitle(relativeTo: now) == "codex - 1 - 0d 0h")
     }
 }

@@ -19,6 +19,19 @@ struct PaceValue {
 enum UsagePace {
     static let day: TimeInterval = 86_400
     static let week = 7 * day
+    static let checkpointInterval: TimeInterval = 120
+
+    static func checkpoints(_ observations: [WeeklyObservation]) -> [WeeklyObservation] {
+        var result: [WeeklyObservation] = []
+        for observation in observations {
+            if let previous = result.last,
+               observation.date.timeIntervalSince(previous.date) < checkpointInterval {
+                continue
+            }
+            result.append(observation)
+        }
+        return result
+    }
 
     static func observation(_ snapshot: QuotaSnapshot) -> WeeklyObservation? {
         guard let window = snapshot.weeklyWindow,
@@ -94,7 +107,9 @@ enum UsagePace {
             var coverage = Double(days) * day
             var estimated = false
             for (id, account) in current {
-                guard let samples = history[id], samples.count >= 2 else { return nil }
+                guard let observations = history[id] else { return nil }
+                let samples = checkpoints(observations)
+                guard samples.count >= 2 else { return nil }
                 var consumed = 0.0
                 var duration = 0.0
                 for (previous, sample) in zip(samples, samples.dropFirst()) {
@@ -106,13 +121,17 @@ enum UsagePace {
                     let elapsed = sample.date.timeIntervalSince(previous.date)
                     guard elapsed > 0 else { continue }
                     let overlap = sample.date.timeIntervalSince(max(previous.date, cutoff))
-                    let sameWindow = abs(sample.reset.timeIntervalSince(previous.reset)) < 2
+                    // A reset requires a new cycle, not timestamp jitter within the same cycle.
+                    let resetAdvanced = sample.reset.timeIntervalSince(previous.reset) > checkpointInterval
+                    let crossedDeadline = previous.reset <= sample.date
+                    let usageRestarted = sample.used < previous.used
+                    let didReset = resetAdvanced && (crossedDeadline || usageRestarted)
                     let dormant = previous.used == 0 && sample.used == 0
-                    if sameWindow && sample.used < previous.used { return nil }
-                    let delta = sameWindow ? sample.used - previous.used : sample.used
+                    if !didReset && usageRestarted { return nil }
+                    let delta = didReset ? sample.used : sample.used - previous.used
                     consumed += delta * sample.capacity * overlap / elapsed
                     duration += overlap
-                    if (!sameWindow && !dormant) || elapsed > 600 { estimated = true }
+                    if (didReset && !dormant) || elapsed > 600 { estimated = true }
                 }
                 guard duration > 0 else { return nil }
                 totalRate += consumed / duration
