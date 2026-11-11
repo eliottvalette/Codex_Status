@@ -491,24 +491,14 @@ private struct ControlRow: View {
         HStack(spacing: 6) {
             if let fetchedAt = oldestFetchedAt {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    let values = store.paceValues(relativeTo: context.date)
-                    Text(([updatedLabel(fetchedAt, relativeTo: context.date)] + values.map(\.label))
+                    let pace = store.paceValue(relativeTo: context.date)
+                    Text(([updatedLabel(fetchedAt, relativeTo: context.date)] + [pace?.label].compactMap { $0 })
                         .joined(separator: " · "))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                        .help(values.map { value in
-                            let hours = Int(value.coverage / 3_600)
-                            let minutes = Int(value.coverage / 60) % 60
-                            return "\(hours)h \(minutes)m / \(value.days)d"
-                        }.joined(separator: " · "))
+                        .help("Combined usage rate since each account's weekly reset, relative to the sustainable rate across all accounts. 100% is sustainable. Recent resets can temporarily amplify the rate.")
                 }
-            }
-
-            if let error = store.paceError {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(.secondary)
-                    .help(error)
             }
 
             if let transferStatus {

@@ -11,9 +11,6 @@ final class UsageStore {
     private(set) var transferSourceID: String?
     private(set) var transferDestinationID: String?
     private(set) var transferFeedback: TransferFeedback?
-    private(set) var paceHistory: [String: [WeeklyObservation]] = [:]
-    private(set) var paceError: String?
-    private let paceHistoryKey = "weeklyUsageHistory.v1"
     private var hasPendingActivationCycle = false
     private var feedbackClearTask: Task<Void, Never>?
 
@@ -40,40 +37,11 @@ final class UsageStore {
         self.client = client
         self.transferService = transferService
         self.refreshInterval = refreshInterval
-        if let data = UserDefaults.standard.data(forKey: paceHistoryKey) {
-            do {
-                paceHistory = try JSONDecoder().decode([String: [WeeklyObservation]].self, from: data)
-            } catch {
-                paceError = "Could not load weekly usage history: \(error.localizedDescription)"
-                NSLog("%@", paceError!)
-            }
-        }
     }
 
-    func paceValues(relativeTo now: Date) -> [PaceValue] {
-        guard paceError == nil else { return [] }
+    func paceValue(relativeTo now: Date) -> PaceValue? {
         let current = UsagePace.currentObservations(statuses, now: now)
-        return UsagePace.values(history: paceHistory, current: current, now: now)
-    }
-
-    private func recordPace(_ snapshot: QuotaSnapshot, profileID: String) {
-        guard paceError == nil, let observation = UsagePace.observation(snapshot) else { return }
-        var samples = paceHistory[profileID, default: []]
-        guard samples.last.map({
-            observation.date.timeIntervalSince($0.date) >= UsagePace.checkpointInterval
-        }) ?? true else { return }
-        samples.append(observation)
-        let cutoff = observation.date.addingTimeInterval(-7 * UsagePace.day)
-        // Retain the preceding sample so a rolling-window boundary can be interpolated.
-        while samples.count > 2 && samples[1].date < cutoff { samples.removeFirst() }
-        paceHistory[profileID] = samples
-        do {
-            let data = try JSONEncoder().encode(paceHistory)
-            UserDefaults.standard.set(data, forKey: paceHistoryKey)
-        } catch {
-            paceError = "Could not save weekly usage history: \(error.localizedDescription)"
-            NSLog("%@", paceError!)
-        }
+        return UsagePace.value(current: current, now: now)
     }
 
     var isTransferring: Bool {
@@ -249,7 +217,6 @@ final class UsageStore {
                 statuses[index].isRefreshing = false
                 switch result.quotaOutcome {
                 case let .success(newSnapshot):
-                    recordPace(newSnapshot, profileID: result.profileID)
                     let previousSnapshot = statuses[index].snapshot
                     let updatedSnapshot = classifySnapshot(
                         newSnapshot: newSnapshot,
@@ -346,7 +313,6 @@ final class UsageStore {
             for candidate in probeCandidateProfiles {
                 do {
                     let secondSnapshot = try await client.fetchRateLimits(for: candidate.profile)
-                    recordPace(secondSnapshot, profileID: candidate.profile.id)
                     let elapsedSeconds = secondSnapshot.fetchedAt.timeIntervalSince(candidate.snapshot.fetchedAt)
 
                     let classifiedShortWindow = secondSnapshot.shortWindow.map { currentWindow in
@@ -410,7 +376,6 @@ final class UsageStore {
         for profile in activatedProfiles {
             do {
                 let firstSnapshot = try await client.fetchRateLimits(for: profile)
-                recordPace(firstSnapshot, profileID: profile.id)
                 verificationFirstSnapshots.append((profile: profile, snapshot: firstSnapshot))
             } catch {
                 continue
@@ -428,7 +393,6 @@ final class UsageStore {
         for verification in verificationFirstSnapshots {
             do {
                 let verificationSecondSnapshot = try await client.fetchRateLimits(for: verification.profile)
-                recordPace(verificationSecondSnapshot, profileID: verification.profile.id)
                 let verificationElapsedSeconds = verificationSecondSnapshot.fetchedAt.timeIntervalSince(verification.snapshot.fetchedAt)
 
                 let verifiedShortWindow = verificationSecondSnapshot.shortWindow.map { currentWindow in
