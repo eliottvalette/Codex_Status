@@ -71,11 +71,7 @@ final class UsageStore {
             return
         }
 
-        if sourceID == tappedProfile.id {
-            transferSourceID = nil
-            transferFeedback = nil
-            return
-        }
+        guard sourceID != tappedProfile.id else { return }
 
         guard let sourceProfile = statuses.first(where: { $0.id == sourceID })?.profile else {
             transferSourceID = nil

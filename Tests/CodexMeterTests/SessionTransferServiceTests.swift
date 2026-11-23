@@ -334,25 +334,70 @@ struct SessionTransferServiceTests {
                 name TEXT,
                 archived INTEGER NOT NULL,
                 preview TEXT NOT NULL,
+                first_user_message TEXT NOT NULL DEFAULT '',
+                has_user_event INTEGER NOT NULL DEFAULT 0,
                 agent_path TEXT,
                 source TEXT NOT NULL,
                 recency_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER,
                 updated_at INTEGER NOT NULL
             );
-            INSERT INTO threads VALUES ('old', '/tmp/old', NULL, 0, 'visible', NULL, 'cli', 10, 10, 10);
-            INSERT INTO threads VALUES ('one', '/tmp/one', 'One', 0, 'visible', NULL, 'cli', 50, 50, 50);
-            INSERT INTO threads VALUES ('two', '/tmp/two', NULL, 0, 'visible', NULL, 'vscode', 40, 40, 40);
-            INSERT INTO threads VALUES ('three', '/tmp/three', NULL, 0, 'visible', NULL, 'cli', 30, 30, 30);
-            INSERT INTO threads VALUES ('archived', '/tmp/archived', NULL, 1, 'visible', NULL, 'cli', 100, 100, 100);
-            INSERT INTO threads VALUES ('hidden', '/tmp/hidden', NULL, 0, '', NULL, 'cli', 90, 90, 90);
-            INSERT INTO threads VALUES ('child', '/tmp/child', NULL, 0, 'visible', '/root/child', '{"subagent":{}}', 80, 80, 80);
+            INSERT INTO threads VALUES ('old', '/tmp/old', NULL, 0, 'visible', '', 0, NULL, 'cli', 10, 10, 10);
+            INSERT INTO threads VALUES ('one', '/tmp/one', 'One', 0, '', 'First message', 0, NULL, 'cli', 50, 50, 50);
+            INSERT INTO threads VALUES ('two', '/tmp/two', NULL, 0, 'visible', '', 0, NULL, 'vscode', 40, 40, 40);
+            INSERT INTO threads VALUES ('three', '/tmp/three', NULL, 0, 'visible', '', 0, NULL, 'cli', 30, 30, 30);
+            INSERT INTO threads VALUES ('archived', '/tmp/archived', NULL, 1, 'visible', '', 0, NULL, 'cli', 100, 100, 100);
+            INSERT INTO threads VALUES ('hidden', '/tmp/hidden', NULL, 0, '', '', 0, NULL, 'cli', 90, 90, 90);
+            INSERT INTO threads VALUES ('child', '/tmp/child', NULL, 0, 'visible', '', 0, '/root/child', '{"subagent":{}}', 80, 80, 80);
             """
         try runSQLite(database: database, sql: sql)
 
         let sessions = try SessionTransferService.recentSessions(for: profile, limit: 3)
         #expect(sessions.map(\.id) == ["one", "two", "three"])
         #expect(sessions.first?.name == "One")
+    }
+
+    @Test("Uses the original user message times after indexing")
+    func restoresRecencyAfterIndexing() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profile = CodexProfile(id: "test", displayName: "test", homeURL: directory)
+        let database = directory.appending(path: "state_5.sqlite")
+        try runSQLite(database: database, sql: """
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY, rollout_path TEXT, name TEXT, preview TEXT,
+                updated_at INTEGER, updated_at_ms INTEGER, recency_at INTEGER, recency_at_ms INTEGER
+            );
+            """)
+        #expect(try SessionTransferService.visibleSessionIDs(in: profile).isEmpty)
+
+        let sessions = try [("older", "2026-11-22T12:00:00.100Z"), ("newer", "2026-11-23T11:58:00.200Z")]
+            .map { id, timestamp in
+                let rollout = directory.appending(path: "\(id).jsonl")
+                try """
+                    {"type":"session_meta","payload":{"id":"\(id)"}}
+                    {"timestamp":"\(timestamp)","type":"response_item","payload":{"type":"message","role":"user"}}
+                    {"timestamp":"2026-11-23T12:00:00.999Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}
+
+                    """.write(to: rollout, atomically: true, encoding: .utf8)
+                try runSQLite(database: database, sql: """
+                    INSERT INTO threads VALUES (
+                        '\(id)', '\(rollout.path)', NULL, 'visible', 1795435200, 1795435200000, 1795435200, 1795435200000
+                    );
+                    """)
+                return SessionTransferService.SessionRecord(id: id, rolloutPath: "/source/\(id)", name: nil)
+            }
+
+        try SessionTransferService.restoreIndexedRecency(for: sessions, in: profile)
+        let result = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: "SELECT id, updated_at_ms, recency_at_ms FROM threads ORDER BY recency_at_ms DESC;"
+        )
+        #expect(String(decoding: result, as: UTF8.self) == """
+            newer|1795435080200|1795435080200
+            older|1795348800100|1795348800100
+
+            """)
     }
 
     @Test("Repairs an existing segmented conversation whose ancestors are not database rows")

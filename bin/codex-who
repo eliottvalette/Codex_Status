@@ -57,11 +57,15 @@ def last_user_message_at(rollout_path: Path) -> float | None:
                         f"Invalid JSON in {rollout_path} on line {line_number}: {error}"
                     ) from error
                 payload = record.get("payload", {})
-                if (
-                    record.get("type") != "response_item"
-                    or payload.get("type") != "message"
-                    or payload.get("role") != "user"
-                ):
+                is_user_event = (
+                    record.get("type") == "event_msg" and payload.get("type") == "user_message"
+                )
+                is_user_message = (
+                    record.get("type") == "response_item"
+                    and payload.get("type") == "message"
+                    and payload.get("role") == "user"
+                )
+                if not (is_user_event or is_user_message):
                     continue
                 timestamp = record.get("timestamp")
                 if not isinstance(timestamp, str):

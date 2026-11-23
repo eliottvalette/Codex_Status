@@ -45,7 +45,7 @@ and the originals remain available.
 
 Check the result at the bottom of the dashboard, then open Codex with the
 destination alias and use `/resume` to continue. To cancel before choosing a
-destination, press **Escape** or right-click the source again.
+destination, left-click any account or press **Escape**.
 
 ## For agents
 

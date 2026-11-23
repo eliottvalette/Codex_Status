@@ -101,29 +101,43 @@ struct SessionTransferService: Sendable {
         }
 
         let availableSessions = try Self.allSessions(for: source)
-        let prepared = try Self.prepareTransferClosure(
+        var prepared = try Self.prepareTransferClosure(
             selected: sessions,
             available: availableSessions,
             from: source,
             to: destination
         )
         let selectedPaths = Set(sessions.map(\.rolloutPath))
+        let visibleIDs = try Self.visibleSessionIDs(in: destination)
+        for index in prepared.indices
+        where selectedPaths.contains(prepared[index].session.rolloutPath)
+            && !visibleIDs.contains(prepared[index].session.id) {
+            prepared[index].requiresIndex = true
+        }
         let copiedCount = prepared.count {
             selectedPaths.contains($0.session.rolloutPath) && $0.requiresIndex
         }
         let copiedSessions = Self.sessionsRequiringIndex(prepared)
+        let copiedIDs = Set(copiedSessions.map(\.id))
+        let previouslyCopiedSessions = prepared.compactMap { transfer -> SessionRecord? in
+            guard selectedPaths.contains(transfer.session.rolloutPath),
+                  !copiedIDs.contains(transfer.session.id),
+                  transfer.destinationData == transfer.sourceData else { return nil }
+            return transfer.session
+        }
         _ = try Self.commit(prepared)
 
-        if copiedSessions.isEmpty == false {
-            do {
+        do {
+            if !copiedSessions.isEmpty {
                 try index(sessions: copiedSessions, in: destination)
-            } catch {
-                throw SessionTransferError.indexingFailed(
-                    profile: destination.displayName,
-                    copiedCount: copiedCount,
-                    reason: error.localizedDescription
-                )
             }
+            try Self.restoreIndexedRecency(for: copiedSessions + previouslyCopiedSessions, in: destination)
+        } catch {
+            throw SessionTransferError.indexingFailed(
+                profile: destination.displayName,
+                copiedCount: copiedCount,
+                reason: error.localizedDescription
+            )
         }
 
         return SessionTransferResult(sessionCount: sessions.count, copiedCount: copiedCount)
@@ -172,7 +186,7 @@ extension SessionTransferService {
             SELECT id, rollout_path, name
             FROM threads
             WHERE archived = 0
-              AND preview <> ''
+              AND (preview <> '' OR first_user_message <> '' OR has_user_event = 1)
               AND agent_path IS NULL
               AND source NOT LIKE '{"subagent"%'
             ORDER BY COALESCE(NULLIF(recency_at_ms, 0), updated_at_ms, updated_at * 1000) DESC, id DESC
@@ -185,6 +199,73 @@ extension SessionTransferService {
         try querySessions(
             for: profile,
             query: "SELECT id, rollout_path, name FROM threads;"
+        )
+    }
+
+    static func visibleSessionIDs(in profile: CodexProfile) throws -> Set<String> {
+        let database = profile.homeURL.appending(path: "state_5.sqlite")
+        guard FileManager.default.fileExists(atPath: database.path) else { return [] }
+        struct VisibleSession: Decodable {
+            let id: String
+        }
+        let output = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: "SELECT id FROM threads WHERE preview <> '';",
+            outputJSON: true
+        )
+        return Set(try JSONDecoder().decode([VisibleSession].self, from: output).map(\.id))
+    }
+
+    static func restoreIndexedRecency(for sessions: [SessionRecord], in profile: CodexProfile) throws {
+        guard !sessions.isEmpty else { return }
+        struct IndexedSession: Decodable {
+            let id: String
+            let path: String
+            let updatedAt: Int64
+        }
+        let database = profile.homeURL.appending(path: "state_5.sqlite")
+        let output = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: """
+                SELECT id, rollout_path AS path,
+                       COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt
+                FROM threads;
+                """,
+            outputJSON: true
+        )
+        let indexed = try JSONDecoder().decode([IndexedSession].self, from: output)
+        let rowsByID = Dictionary(uniqueKeysWithValues: indexed.map { ($0.id, $0) })
+        let profileRoot = profile.homeURL.resolvingSymlinksInPath().standardizedFileURL.path
+        var updates: [String] = []
+        for session in sessions {
+            guard let row = rowsByID[session.id] else {
+                throw SessionTransferError.invalidQueryResponse("Missing destination index row for \(session.id).")
+            }
+            let rollout = URL(fileURLWithPath: row.path).resolvingSymlinksInPath().standardizedFileURL
+            guard rollout.path.hasPrefix(profileRoot + "/") else {
+                throw SessionTransferError.rolloutOutsideProfile(threadID: session.id, path: row.path)
+            }
+            let data = try Data(contentsOf: rollout)
+            try validateRollout(data, threadID: session.id)
+            guard let date = try latestUserRequest(in: data) else { continue }
+            let milliseconds = Int64((date.timeIntervalSince1970 * 1_000).rounded())
+            let seconds = milliseconds / 1_000
+            let id = session.id.replacingOccurrences(of: "'", with: "''")
+            let path = row.path.replacingOccurrences(of: "'", with: "''")
+            // Preserve any concurrent change to the destination's indexed activity.
+            updates.append("""
+                UPDATE threads
+                SET updated_at = \(seconds), updated_at_ms = \(milliseconds),
+                    recency_at = \(seconds), recency_at_ms = \(milliseconds)
+                WHERE id = '\(id)' AND rollout_path = '\(path)'
+                    AND COALESCE(updated_at_ms, updated_at * 1000) = \(row.updatedAt);
+                """)
+        }
+        guard !updates.isEmpty else { return }
+        _ = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: (["PRAGMA busy_timeout = 5000;", "BEGIN IMMEDIATE;"] + updates + ["COMMIT;"])
+                .joined(separator: "\n")
         )
     }
 
@@ -333,7 +414,7 @@ extension SessionTransferService {
         let destinationURL = destination.homeURL.appending(path: relativePath).standardizedFileURL
         let data: Data
         do {
-            data = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+            data = try Data(contentsOf: sourceURL)
         } catch {
             throw SessionTransferError.unreadableRollout(
                 threadID: session.id,

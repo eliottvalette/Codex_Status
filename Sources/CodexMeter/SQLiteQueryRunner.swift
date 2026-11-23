@@ -70,6 +70,6 @@ enum SQLiteQueryRunner {
                 stderr: stderr
             )
         }
-        return output
+        return outputJSON && output.isEmpty ? Data("[]".utf8) : output
     }
 }

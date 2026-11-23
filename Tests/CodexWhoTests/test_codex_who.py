@@ -26,8 +26,8 @@ class CodexWhoTests(unittest.TestCase):
             readable = profile / "readable.jsonl"
             readable.write_text(json.dumps({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "response_item",
-                "payload": {"type": "message", "role": "user"},
+                "type": "event_msg",
+                "payload": {"type": "user_message"},
             }) + "\n")
             with sqlite3.connect(profile / "state_5.sqlite") as database:
                 database.execute("""CREATE TABLE threads (
