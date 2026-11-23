@@ -135,6 +135,19 @@ struct SessionTransferServiceTests {
         #expect(try SessionTransferService.commit(SessionTransferService.prepareTransferClosure(selected: [first], available: [first], from: a, to: b)) == 0)
     }
 
+    @Test("Treats equal-length local settings as equivalent without ignoring changed messages")
+    func comparesLocalSettingsWithoutChangingHistoryOffsets() {
+        let history = rolloutData(threadID: "thread-1")
+        let first = Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"setting\":\"one\"}}\n".utf8)
+        let second = Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"setting\":\"two\"}}\n".utf8)
+        #expect(SessionTransferService.sameHistoryWithLocalSettings(history + first, history + second))
+        #expect(!SessionTransferService.sameHistoryWithLocalSettings(history + first, history + second + Data(" ".utf8)))
+        #expect(!SessionTransferService.sameHistoryWithLocalSettings(
+            rolloutData(threadID: "thread-1", marker: "first") + first,
+            rolloutData(threadID: "thread-1", marker: "other") + second
+        ))
+    }
+
     @Test("Divergent conversations follow user request recency rather than file size", arguments: [true, false])
     func comparesDivergentRequestTimestamps(sourceNewer: Bool) throws {
         func data(_ date: String, _ message: String) -> Data {
@@ -360,6 +373,17 @@ struct SessionTransferServiceTests {
         let syncSessions = try SessionTransferService.sessionsInSyncWindow(for: profile, now: now)
         #expect(syncSessions.map(\.id) == ["one", "two", "three"])
 
+        let continued = directory.appending(path: "one.jsonl")
+        let unchanged = directory.appending(path: "two.jsonl")
+        try Data("""
+            {"timestamp":"1970-01-01T00:00:00.050Z","type":"event_msg","payload":{"type":"user_message"}}
+
+            """.utf8).write(to: continued)
+        try rolloutData(threadID: "two").write(to: unchanged)
+        try runSQLite(database: database, sql: """
+            UPDATE threads SET rollout_path = '\(continued.path)' WHERE id = 'one';
+            UPDATE threads SET rollout_path = '\(unchanged.path)', recency_at_ms = 60 WHERE id = 'two';
+            """)
         try """
             [{"sourceID":"original","forkID":"two","activityMilliseconds":40},
              {"sourceID":"other","forkID":"one","activityMilliseconds":45}]

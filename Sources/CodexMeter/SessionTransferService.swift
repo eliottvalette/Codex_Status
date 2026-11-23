@@ -124,7 +124,10 @@ struct SessionTransferService: Sendable {
         var sources: [(CodexProfile, [SessionRecord])] = []
         for profile in profiles {
             do {
-                sources.append((profile, try Self.sessionsInSyncWindow(for: profile, now: now)))
+                let sessions = try Self.sessionsInSyncWindow(for: profile, now: now) { issue in
+                    result.issues.append("\(profile.displayName): \(issue)")
+                }
+                sources.append((profile, sessions))
             } catch {
                 result.issues.append("\(profile.displayName): \(error.localizedDescription)")
             }
@@ -163,6 +166,7 @@ struct SessionTransferService: Sendable {
             destinationRecords = [:]
         }
         let selectedPaths = Set(sessions.map(\.rolloutPath))
+        var detachedPaths: [String: String] = [:]
         var prepared = try Self.prepareTransferClosure(
             selected: sessions,
             available: availableSessions,
@@ -173,12 +177,22 @@ struct SessionTransferService: Sendable {
                 if selectedPaths.contains(item.session.rolloutPath),
                    let indexedPath = destinationRecords[item.session.id]?.rolloutPath,
                    URL(fileURLWithPath: indexedPath).resolvingSymlinksInPath() != item.destinationURL.resolvingSymlinksInPath() {
-                    throw SessionTransferError.divergentHistory(item.session.id)
+                    let indexedURL = URL(fileURLWithPath: indexedPath).resolvingSymlinksInPath()
+                    let directory = destination.homeURL.resolvingSymlinksInPath()
+                    guard indexedURL.path.hasPrefix(directory.path + "/"),
+                          try Self.isDetachedMetadataRollout(indexedURL, id: item.session.id),
+                          try Self.latestUserRequest(in: item.sourceData) != nil else {
+                        throw SessionTransferError.divergentHistory(item.session.id)
+                    }
+                    detachedPaths[item.session.id] = indexedPath
                 }
                 if let existing = item.destinationData,
                    !existing.starts(with: item.sourceData),
                    !item.sourceData.starts(with: existing) {
-                    throw SessionTransferError.divergentHistory(item.session.id)
+                    guard Self.sameHistoryWithLocalSettings(item.sourceData, existing) else {
+                        throw SessionTransferError.divergentHistory(item.session.id)
+                    }
+                    item.disposition = .alreadyPresent
                 }
             },
             onSkippedSession: onSyncIssue
@@ -187,11 +201,9 @@ struct SessionTransferService: Sendable {
         let selectedIDs = Set(selected.map(\.session.id))
         let requestedIDs = Set(sessions.map(\.id))
         let visibleIDs = try Self.visibleSessionIDs(in: destination)
-        let historyIDs = try Self.projectedSessionIDs(in: destination)
         for index in prepared.indices where selectedPaths.contains(prepared[index].session.rolloutPath) {
             let item = prepared[index]
-            if !visibleIDs.contains(item.session.id)
-                || (item.usesPaginatedHistory && !historyIDs.contains(item.session.id)) {
+            if !visibleIDs.contains(item.session.id) || detachedPaths[item.session.id] != nil {
                 prepared[index].requiresIndex = true
             }
         }
@@ -212,9 +224,8 @@ struct SessionTransferService: Sendable {
                     guard rollout.path.hasPrefix(home.path + "/") else {
                         throw SessionTransferError.rolloutOutsideProfile(threadID: record.id, path: rollout.path)
                     }
-                    let metadata = try Self.validateRollout(Data(contentsOf: rollout), threadID: record.id)
-                    if !visibleIDs.contains(record.id)
-                        || (metadata.usesPaginatedHistory && !historyIDs.contains(record.id)) {
+                    if !visibleIDs.contains(record.id) {
+                        try Self.validateRollout(Data(contentsOf: rollout), threadID: record.id)
                         copiedSessions.append(record)
                     }
                 } catch {
@@ -228,6 +239,7 @@ struct SessionTransferService: Sendable {
         var indexedSessions: [SessionRecord] = []
         var pickerImportsCount = 0
         do {
+            try Self.repairDetachedIndexPaths(detachedPaths, using: selected, in: destination)
             if !copiedSessions.isEmpty {
                 indexedSessions = try index(sessions: copiedSessions, in: destination, onIssue: onSyncIssue)
             }
@@ -279,19 +291,17 @@ extension SessionTransferService {
         let threadID: String
         let sourceThreadID: String?
         var historyBaseThreadID: String? = nil
-        var usesPaginatedHistory = false
     }
 
     struct PreparedTransfer {
         let session: SessionRecord
         let sourceData: Data
         let destinationURL: URL
-        let disposition: DestinationDisposition
+        var disposition: DestinationDisposition
         let sourceThreadID: String?
         var historyBaseThreadID: String? = nil
         var requiresIndex = false
         var destinationData: Data? = nil
-        var usesPaginatedHistory = false
         var sourceModificationDate: Date? = nil
     }
 
@@ -300,22 +310,34 @@ extension SessionTransferService {
         return try eligibleSessions(for: profile, limit: "LIMIT \(safeLimit)")
     }
 
-    static func sessionsInSyncWindow(for profile: CodexProfile, now: Date) throws -> [SessionRecord] {
+    static func sessionsInSyncWindow(
+        for profile: CodexProfile,
+        now: Date,
+        onSkippedSession: ((String) -> Void)? = nil
+    ) throws -> [SessionRecord] {
         guard FileManager.default.fileExists(atPath: profile.homeURL.appending(path: "state_5.sqlite").path) else {
             return []
         }
         let cutoff = Int64(now.addingTimeInterval(-10 * 86_400).timeIntervalSince1970 * 1_000)
-        let imports = try pickerImports(in: profile)
-        let unchangedImports = imports.map { item in
-            "NOT (id = '\(sqlString(item.forkID))' AND recency_at_ms <= \(item.activityMilliseconds))"
-        }
-        let filters = [
-            "COALESCE(NULLIF(recency_at_ms, 0), updated_at_ms, updated_at * 1000) >= \(cutoff)"
-        ] + unchangedImports
-        return try eligibleSessions(
+        let imports = Dictionary(try pickerImports(in: profile).map { ($0.forkID, $0.activityMilliseconds) }) { _, newest in newest }
+        let sessions = try eligibleSessions(
             for: profile,
-            activityFilter: "AND " + filters.joined(separator: " AND ")
+            activityFilter: "AND COALESCE(NULLIF(recency_at_ms, 0), updated_at_ms, updated_at * 1000) >= \(cutoff)"
         )
+        return try sessions.compactMap { session in
+            do {
+                let resolved = try resolveDetachedMetadataRollout(session)
+                guard let baseline = imports[session.id] else { return resolved }
+                let data = try Data(contentsOf: URL(fileURLWithPath: resolved.rolloutPath))
+                guard let date = try latestUserRequest(in: data),
+                      Int64((date.timeIntervalSince1970 * 1_000).rounded()) > baseline else { return nil }
+                return resolved
+            } catch {
+                guard let onSkippedSession else { throw error }
+                onSkippedSession("\(session.name ?? session.id): \(error.localizedDescription)")
+                return nil
+            }
+        }
     }
 
     private static func eligibleSessions(
@@ -351,6 +373,82 @@ extension SessionTransferService {
         value.replacingOccurrences(of: "'", with: "''")
     }
 
+    private static func isDetachedMetadataRollout(_ url: URL, id: String) throws -> Bool {
+        guard url.deletingPathExtension().lastPathComponent.contains("_"),
+              let length = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              length <= 65_536 else { return false }
+        let data = try Data(contentsOf: url)
+        let metadata = try validateRollout(data, threadID: id)
+        guard metadata.historyBaseThreadID == nil, metadata.sourceThreadID == nil else { return false }
+        return try data.split(separator: 0x0A).allSatisfy { line in
+            guard let record = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return false }
+            return record["type"] as? String == "session_meta"
+                || (record["type"] as? String == "event_msg"
+                    && (record["payload"] as? [String: Any])?["type"] as? String == "thread_settings_applied")
+        }
+    }
+
+    static func sameHistoryWithLocalSettings(_ source: Data, _ destination: Data) -> Bool {
+        guard source.count == destination.count else { return false }
+        let sourceLines = source.split(separator: 0x0A, omittingEmptySubsequences: false)
+        let destinationLines = destination.split(separator: 0x0A, omittingEmptySubsequences: false)
+        guard sourceLines.count == destinationLines.count else { return false }
+        // Preserve the byte offsets and ordinal positions referenced by paginated forks.
+        return zip(sourceLines, destinationLines).allSatisfy { sourceLine, destinationLine in
+            sourceLine == destinationLine || (sourceLine.count == destinationLine.count
+                && isLocalSettingsRecord(sourceLine) && isLocalSettingsRecord(destinationLine))
+        }
+    }
+
+    private static func isLocalSettingsRecord(_ line: Data.SubSequence) -> Bool {
+        guard let record = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+              record["type"] as? String == "event_msg",
+              let payload = record["payload"] as? [String: Any] else { return false }
+        return payload["type"] as? String == "thread_settings_applied"
+    }
+
+    private static func resolveDetachedMetadataRollout(_ session: SessionRecord) throws -> SessionRecord {
+        let path = URL(fileURLWithPath: session.rolloutPath)
+        guard try isDetachedMetadataRollout(path, id: session.id) else { return session }
+        let siblings = try FileManager.default.contentsOfDirectory(
+            at: path.deletingLastPathComponent(), includingPropertiesForKeys: nil
+        )
+        let roots = siblings.filter { $0.lastPathComponent.hasSuffix("-\(session.id).jsonl") }
+        guard roots.count == 1, let root = roots.first else {
+            throw SessionTransferError.missingLineageSource(threadID: session.id, sourceThreadID: session.id)
+        }
+        let data = try Data(contentsOf: root)
+        try validateRollout(data, threadID: session.id)
+        guard try latestUserRequest(in: data) != nil else {
+            throw SessionTransferError.invalidQueryResponse("Missing user history in \(root.lastPathComponent).")
+        }
+        return SessionRecord(id: session.id, rolloutPath: root.path, name: session.name)
+    }
+
+    private static func repairDetachedIndexPaths(
+        _ paths: [String: String],
+        using selected: [PreparedTransfer],
+        in profile: CodexProfile
+    ) throws {
+        guard !paths.isEmpty else { return }
+        var updates: [String] = []
+        for item in selected {
+            guard let path = paths[item.session.id] else { continue }
+            let old = URL(fileURLWithPath: path)
+            guard try isDetachedMetadataRollout(old, id: item.session.id) else {
+                throw SessionTransferError.copyFailed(threadID: item.session.id, reason: "Destination history changed during repair.")
+            }
+            updates.append("""
+                UPDATE threads SET rollout_path = '\(sqlString(item.destinationURL.path))'
+                WHERE id = '\(sqlString(item.session.id))' AND rollout_path = '\(sqlString(path))';
+                """)
+        }
+        _ = try SQLiteQueryRunner.query(
+            databaseURL: profile.homeURL.appending(path: "state_5.sqlite"),
+            sql: (["PRAGMA busy_timeout = 5000;", "BEGIN IMMEDIATE;"] + updates + ["COMMIT;"]).joined(separator: "\n")
+        )
+    }
+
     static func allSessions(for profile: CodexProfile) throws -> [SessionRecord] {
         try querySessions(
             for: profile,
@@ -370,20 +468,6 @@ extension SessionTransferService {
             outputJSON: true
         )
         return Set(try JSONDecoder().decode([VisibleSession].self, from: output).map(\.id))
-    }
-
-    private static func projectedSessionIDs(in profile: CodexProfile) throws -> Set<String> {
-        let database = profile.homeURL.appending(path: "thread_history_1.sqlite")
-        guard FileManager.default.fileExists(atPath: database.path) else { return [] }
-        struct ProjectedSession: Decodable {
-            let id: String
-        }
-        let output = try SQLiteQueryRunner.query(
-            databaseURL: database,
-            sql: "SELECT thread_id AS id FROM thread_history_projection_state;",
-            outputJSON: true
-        )
-        return Set(try JSONDecoder().decode([ProjectedSession].self, from: output).map(\.id))
     }
 
     static func restoreIndexedRecency(
@@ -479,10 +563,10 @@ extension SessionTransferService {
         available: [SessionRecord],
         from source: CodexProfile,
         to destination: CodexProfile,
-        validate: (PreparedTransfer) throws -> Void = { _ in },
+        validate: (inout PreparedTransfer) throws -> Void = { _ in },
         onSkippedSession: ((String) -> Void)? = nil
     ) throws -> [PreparedTransfer] {
-        let recordsByID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
+        let recordsByID = Dictionary((available + selected).map { ($0.id, $0) }) { _, selected in selected }
         var preparedByPath: [String: PreparedTransfer] = [:]
         var visiting: Set<String> = []
         var ordered: [PreparedTransfer] = []
@@ -526,7 +610,7 @@ extension SessionTransferService {
             defer { visiting.remove(path) }
 
             var transfer = try prepareTransfer(session, from: source, to: destination)
-            try validate(transfer)
+            try validate(&transfer)
             transfer.requiresIndex = transfer.disposition != .alreadyPresent
             if let segmentID = transfer.historyBaseThreadID {
                 let segment = try historySegment(segmentID, for: session)
@@ -631,7 +715,6 @@ extension SessionTransferService {
             sourceThreadID: metadata.sourceThreadID,
             historyBaseThreadID: metadata.historyBaseThreadID,
             destinationData: destinationData,
-            usesPaginatedHistory: metadata.usesPaginatedHistory,
             sourceModificationDate: try sourceURL.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate
         )
@@ -677,8 +760,7 @@ extension SessionTransferService {
                 metadata = RolloutMetadata(
                     threadID: metadataThreadID,
                     sourceThreadID: payload["forked_from_id"] as? String,
-                    historyBaseThreadID: historyBaseThreadID,
-                    usesPaginatedHistory: payload["history_mode"] as? String == "paginated"
+                    historyBaseThreadID: historyBaseThreadID
                 )
             }
         }
@@ -695,8 +777,8 @@ extension SessionTransferService {
         threadID: String
     ) throws -> DestinationDisposition {
         guard let destinationData else { return .copy }
-        try validateRollout(destinationData, threadID: threadID)
         guard sourceData != destinationData else { return .alreadyPresent }
+        try validateRollout(destinationData, threadID: threadID)
         if sourceData.starts(with: destinationData) { return .replace }
         if destinationData.starts(with: sourceData) { return .alreadyPresent }
         let sourceDate = try latestUserRequest(in: sourceData)
@@ -960,22 +1042,7 @@ private extension SessionTransferService {
         )
 
         if let thread = resumed["thread"] as? [String: Any], thread["historyMode"] as? String == "paginated" {
-            var cursor: String?
-            var seenCursors: Set<String> = []
-            repeat {
-                var params: [String: Any] = [
-                    "threadId": session.id,
-                    "limit": 100,
-                ]
-                if let cursor {
-                    params["cursor"] = cursor
-                }
-                let result = try rpc.call(method: "thread/items/list", params: params)
-                cursor = result["nextCursor"] as? String
-                if let cursor, !seenCursors.insert(cursor).inserted {
-                    throw SessionTransferError.appServerFailed("thread/items/list repeated a pagination cursor.")
-                }
-            } while cursor != nil
+            _ = try rpc.call(method: "thread/items/list", params: ["threadId": session.id, "limit": 1])
         }
 
         if let name = session.name, name.isEmpty == false {
