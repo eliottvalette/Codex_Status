@@ -2,6 +2,7 @@ import Foundation
 
 enum ClaudeUsageError: Error, Equatable, LocalizedError {
     case serverError(String)
+    case unsupportedVersion
     case missingResult
     case planLimitsUnavailable
     case activationFailed(String)
@@ -10,6 +11,8 @@ enum ClaudeUsageError: Error, Equatable, LocalizedError {
         switch self {
         case let .serverError(message):
             "Claude Code could not read usage: \(message)"
+        case .unsupportedVersion:
+            "This Claude Code is too old to report usage. Run `claude update`, then refresh."
         case .missingResult:
             "The Claude usage response did not contain a result."
         case .planLimitsUnavailable:
@@ -92,7 +95,12 @@ enum ClaudeUsageParser {
         }
 
         if response["subtype"] as? String == "error" {
-            throw ClaudeUsageError.serverError(response["error"] as? String ?? "Unknown error")
+            let message = response["error"] as? String ?? "Unknown error"
+            // Older versions answer every request they do not know with this text.
+            if message.hasPrefix("Unsupported control request subtype") {
+                throw ClaudeUsageError.unsupportedVersion
+            }
+            throw ClaudeUsageError.serverError(message)
         }
         guard let result = response["response"] as? [String: Any] else {
             throw ClaudeUsageError.missingResult

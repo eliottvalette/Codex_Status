@@ -85,11 +85,18 @@ struct ClaudeUsageClientTests {
         #expect(throws: ClaudeUsageError.planLimitsUnavailable) {
             try ClaudeUsageParser.parseResponseLine(apiKeyProfile)
         }
-        #expect(throws: ClaudeUsageError.serverError("Unsupported control request subtype: get_usage")) {
+        // Claude Code 2.1.112 answers the usage request this way.
+        #expect(throws: ClaudeUsageError.unsupportedVersion) {
             try ClaudeUsageParser.parseResponseLine(response(
                 #""error":"Unsupported control request subtype: get_usage""#, subtype: "error"
             ))
         }
+        #expect(throws: ClaudeUsageError.serverError("Usage is temporarily unavailable")) {
+            try ClaudeUsageParser.parseResponseLine(response(
+                #""error":"Usage is temporarily unavailable""#, subtype: "error"
+            ))
+        }
+        #expect(ClaudeUsageError.unsupportedVersion.errorDescription?.contains("claude update") == true)
         #expect(throws: ClaudeUsageError.missingResult) {
             try ClaudeUsageParser.parseResponseLine(response(#""note":"empty""#))
         }
