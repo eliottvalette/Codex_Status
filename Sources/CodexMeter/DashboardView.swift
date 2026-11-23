@@ -266,42 +266,56 @@ private struct AliasQuadrant: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
+        } else if gauges.count == 1 {
             // Profile has no 5H quota — ring fills available space
             GeometryReader { geo in
                 let diameter = max(50, min(84, min(geo.size.width - 16, geo.size.height - 44)))
                 QuotaGauge(
-                    label: "WEEK",
-                    window: status.snapshot?.weeklyWindow,
+                    label: gauges[0].label,
+                    window: gauges[0].window,
                     diameter: diameter
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             GeometryReader { geo in
-                let availableWidthPerGauge = geo.size.width / 2
+                let availableWidthPerGauge = geo.size.width / CGFloat(gauges.count)
                 let maxHorizontalDiameter = availableWidthPerGauge - 12
                 let maxVerticalDiameter = geo.size.height - 44
-                let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
+                // Three rings share the box, so each gets a little less room.
+                let maxDiameter: CGFloat = gauges.count > 2 ? 70 : 78
+                let diameter = max(50, min(maxDiameter, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
                 HStack(spacing: 0) {
-                    QuotaGauge(
-                        label: "5H",
-                        window: status.snapshot?.shortWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    QuotaGauge(
-                        label: "WEEK",
-                        window: status.snapshot?.weeklyWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ForEach(Array(gauges.enumerated()), id: \.offset) { _, gauge in
+                        QuotaGauge(
+                            label: gauge.label,
+                            window: gauge.window,
+                            diameter: diameter
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    /// 5H when the plan has one, WEEK, then the tightest single-model weekly limit when
+    /// one is in use. Codex accounts report no model limits, so they show one or two rings.
+    private var gauges: [(label: String, window: QuotaWindow?)] {
+        guard let snapshot = status.snapshot else {
+            return [("5H", nil), ("WEEK", nil)]
+        }
+        var gauges: [(label: String, window: QuotaWindow?)] = []
+        if let shortWindow = snapshot.shortWindow {
+            gauges.append(("5H", shortWindow))
+        }
+        gauges.append(("WEEK", snapshot.weeklyWindow))
+        if let model = snapshot.tightestModelWindow {
+            gauges.append((model.label, model.window))
+        }
+        return gauges
     }
 }
 

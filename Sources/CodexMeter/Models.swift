@@ -102,7 +102,7 @@ struct ModelQuotaWindow: Equatable, Sendable {
 
     /// Short enough to sit above a ring.
     var label: String {
-        String(name.uppercased().prefix(7))
+        String(name.uppercased().prefix(7)).trimmingCharacters(in: .whitespaces)
     }
 }
 
