@@ -1,9 +1,42 @@
 import Foundation
 
+enum ProfileProvider: String, Hashable, Sendable {
+    case codex
+    case claude
+
+    var displayName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
+}
+
 struct CodexProfile: Identifiable, Hashable, Sendable {
     let id: String
     let displayName: String
     let homeURL: URL
+    let provider: ProfileProvider
+
+    init(id: String, displayName: String, homeURL: URL, provider: ProfileProvider = .codex) {
+        self.id = id
+        self.displayName = displayName
+        self.homeURL = homeURL
+        self.provider = provider
+    }
+
+    /// The profiles the app tracks: the compiled Codex list, then every Claude Code profile
+    /// found under the home directory. When Claude profiles exist and none of the Codex
+    /// directories do, the Codex list is left out.
+    static func launchProfiles(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        codex: [CodexProfile] = configured
+    ) -> [CodexProfile] {
+        let claude = ClaudeProfiles.discover(home: home)
+        guard claude.isEmpty == false else { return codex }
+        let hasCodexHome = codex.contains { FileManager.default.fileExists(atPath: $0.homeURL.path) }
+        return (hasCodexHome ? codex : []) + claude
+    }
 
     static let configured: [CodexProfile] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -131,6 +164,37 @@ struct ProfileStatus: Identifiable, Sendable {
             return "\(profile.displayName) - \(availableCredits) - \(days)d"
         }
         return "\(profile.displayName) - \(availableCredits)"
+    }
+}
+
+struct LowestRemainingQuota: Equatable, Sendable {
+    let provider: ProfileProvider
+    let percent: Int
+
+    /// The tightest quota window across all profiles, with the provider it belongs to.
+    static func find(in statuses: [ProfileStatus]) -> LowestRemainingQuota? {
+        statuses
+            .flatMap { status -> [LowestRemainingQuota] in
+                guard let snapshot = status.snapshot else { return [] }
+                return [snapshot.shortWindow, snapshot.weeklyWindow].compactMap { window in
+                    window.map {
+                        LowestRemainingQuota(
+                            provider: status.profile.provider,
+                            percent: Int($0.remainingPercent.rounded())
+                        )
+                    }
+                }
+            }
+            .min(by: { $0.percent < $1.percent })
+    }
+}
+
+struct SessionTransferResult: Sendable, Equatable {
+    let sessionCount: Int
+    let copiedCount: Int
+
+    var alreadyPresentCount: Int {
+        sessionCount - copiedCount
     }
 }
 

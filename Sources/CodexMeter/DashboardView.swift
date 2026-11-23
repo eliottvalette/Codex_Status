@@ -3,29 +3,116 @@ import SwiftUI
 
 // MARK: - Root
 
+private enum DashboardLayout {
+    static let quadrantHeight: CGFloat = 198
+    static let codexGridHeight: CGFloat = 2 * quadrantHeight
+}
+
 struct DashboardView: View {
     let store: UsageStore
 
+    private var codexStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .codex }
+    }
+
+    private var claudeStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .claude }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            QuadrantGrid(
-                statuses: store.statuses,
-                mostRecentID: store.mostRecentProfileID,
-                onProfileRightClick: { profileID in
-                    Task { await store.handleProfileTap(profileID) }
-                },
-                onProfileLeftClick: {
-                    if store.transferSourceID != nil {
-                        store.cancelTransferSelection()
+            if codexStatuses.isEmpty == false {
+                QuadrantGrid(
+                    statuses: codexStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onProfileRightClick: { profileID in
+                        Task { await store.handleProfileTap(profileID) }
+                    },
+                    onProfileLeftClick: {
+                        if store.transferSourceID != nil {
+                            store.cancelTransferSelection()
+                        }
                     }
-                }
-            )
+                )
+                .frame(height: DashboardLayout.codexGridHeight)
+            }
+            if codexStatuses.isEmpty == false && claudeStatuses.isEmpty == false {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+            }
+            if claudeStatuses.isEmpty == false {
+                ProfileRows(
+                    statuses: claudeStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onProfileRightClick: { profileID in
+                        Task { await store.handleProfileTap(profileID) }
+                    },
+                    onProfileLeftClick: {
+                        if store.transferSourceID != nil {
+                            store.cancelTransferSelection()
+                        }
+                    }
+                )
+            }
             ControlRow(store: store)
         }
-        .frame(width: 640, height: 420)
+        .frame(width: 640)
         .onExitCommand {
             store.cancelTransferSelection()
         }
+    }
+}
+
+// MARK: - Claude rows
+
+/// Claude profiles are discovered at launch, so they are laid out two to a row
+/// below the fixed Codex grid.
+private struct ProfileRows: View {
+    let statuses: [ProfileStatus]
+    let mostRecentID: String?
+    let onProfileRightClick: (String) -> Void
+    let onProfileLeftClick: () -> Void
+
+    private var rows: [[ProfileStatus]] {
+        stride(from: 0, to: statuses.count, by: 2).map { start in
+            Array(statuses[start..<min(start + 2, statuses.count)])
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(height: 1)
+                }
+                HStack(spacing: 0) {
+                    quadrant(row[0])
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1)
+                    if row.count > 1 {
+                        quadrant(row[1])
+                    } else {
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: DashboardLayout.quadrantHeight)
+            }
+        }
+    }
+
+    private func quadrant(_ status: ProfileStatus) -> some View {
+        AliasQuadrant(
+            status: status,
+            isMostRecent: status.id == mostRecentID,
+            onRightClick: onProfileRightClick,
+            onLeftClick: onProfileLeftClick
+        )
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -365,11 +452,13 @@ private struct QuotaGauge: View {
     }
 
     private func resetFraction(relativeTo now: Date) -> Double {
-        guard let window, let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
-            return 0
-        }
+        guard let window else { return 0 }
+        // An idle Claude window has no reset time yet, so check for idle first.
         if window.state == .dormant {
             return 1.0
+        }
+        guard let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
+            return 0
         }
         let windowSeconds = Double(durationMinutes) * 60
         let timeLeft = max(0, resetsAt.timeIntervalSince(now))

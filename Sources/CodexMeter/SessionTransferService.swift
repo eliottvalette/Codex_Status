@@ -1,15 +1,6 @@
 import Darwin
 import Foundation
 
-struct SessionTransferResult: Sendable, Equatable {
-    let sessionCount: Int
-    let copiedCount: Int
-
-    var alreadyPresentCount: Int {
-        sessionCount - copiedCount
-    }
-}
-
 enum SessionTransferError: Error, LocalizedError {
     case sameProfile
     case invalidQueryResponse(String)
