@@ -11,6 +11,7 @@ final class UsageStore {
     private(set) var transferSourceID: String?
     private(set) var transferDestinationID: String?
     private(set) var transferFeedback: TransferFeedback?
+    private(set) var isSyncing = false
     private var hasPendingActivationCycle = false
     private var feedbackClearTask: Task<Void, Never>?
 
@@ -45,7 +46,34 @@ final class UsageStore {
     }
 
     var isTransferring: Bool {
-        transferDestinationID != nil
+        transferDestinationID != nil || isSyncing
+    }
+
+    func syncRecentConversations() async {
+        guard !isTransferring else { return }
+        feedbackClearTask?.cancel()
+        transferSourceID = nil
+        isSyncing = true
+        defer { isSyncing = false }
+        transferFeedback = TransferFeedback(style: .progress, message: "Syncing the last 10 days…")
+        do {
+            let result = try await transferService.syncRecentSessions(across: statuses.map(\.profile))
+            if result.issues.isEmpty {
+                transferFeedback = TransferFeedback(
+                    style: .success,
+                    message: "Sync complete · \(result.updatedCount) copies updated"
+                )
+                scheduleFeedbackClear()
+            } else {
+                transferFeedback = TransferFeedback(
+                    style: .failure,
+                    message: "Sync finished · \(result.updatedCount) updated · \(result.issues.count) skipped",
+                    detail: result.issues.joined(separator: "\n")
+                )
+            }
+        } catch {
+            transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
+        }
     }
 
     func cancelTransferSelection() {

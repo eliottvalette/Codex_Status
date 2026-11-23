@@ -55,44 +55,18 @@ private struct QuadrantGrid: View {
         let halfW = width / 2
         let halfH = height / 2
 
-        if statuses.count >= 5 {
+        ForEach(Array(statuses.prefix(4).enumerated()), id: \.element.id) { index, status in
             AliasQuadrant(
-                status: statuses[0],
-                isMostRecent: statuses[0].id == mostRecentID,
+                status: status,
+                isMostRecent: status.id == mostRecentID,
                 onRightClick: onProfileRightClick,
                 onLeftClick: onProfileLeftClick
             )
             .frame(width: halfW, height: halfH)
-            .position(x: halfW / 2, y: halfH / 2)
-
-            AliasQuadrant(
-                status: statuses[1],
-                isMostRecent: statuses[1].id == mostRecentID,
-                onRightClick: onProfileRightClick,
-                onLeftClick: onProfileLeftClick
+            .position(
+                x: halfW * (CGFloat(index % 2) + 0.5),
+                y: halfH * (CGFloat(index / 2) + 0.5)
             )
-            .frame(width: halfW, height: halfH)
-            .position(x: halfW + halfW / 2, y: halfH / 2)
-
-            AliasQuadrant(
-                status: statuses[2],
-                isMostRecent: statuses[2].id == mostRecentID,
-                onRightClick: onProfileRightClick,
-                onLeftClick: onProfileLeftClick
-            )
-            .frame(width: halfW, height: halfH)
-            .position(x: halfW / 2, y: halfH + halfH / 2)
-
-            SharedWeeklyQuadrant(
-                leftStatus: statuses[3],
-                rightStatus: statuses[4],
-                leftMostRecent: statuses[3].id == mostRecentID,
-                rightMostRecent: statuses[4].id == mostRecentID,
-                onRightClick: onProfileRightClick,
-                onLeftClick: onProfileLeftClick
-            )
-            .frame(width: halfW, height: halfH)
-            .position(x: halfW + halfW / 2, y: halfH + halfH / 2)
         }
     }
 
@@ -204,108 +178,6 @@ private struct AliasQuadrant: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-    }
-}
-
-// MARK: - Shared weekly quadrant (codex-bio + codex-ster)
-
-private struct SharedWeeklyQuadrant: View {
-    let leftStatus: ProfileStatus
-    let rightStatus: ProfileStatus
-    let leftMostRecent: Bool
-    let rightMostRecent: Bool
-    let onRightClick: (String) -> Void
-    let onLeftClick: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            headerRow
-            gaugeRow
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay {
-            HStack(spacing: 0) {
-                ProfileTransferOverlay(
-                    profileID: leftStatus.id,
-                    isEnabled: leftStatus.errorMessage == nil || leftStatus.snapshot != nil,
-                    onRightClick: onRightClick,
-                onLeftClick: onLeftClick
-                )
-                ProfileTransferOverlay(
-                    profileID: rightStatus.id,
-                    isEnabled: rightStatus.errorMessage == nil || rightStatus.snapshot != nil,
-                    onRightClick: onRightClick,
-                onLeftClick: onLeftClick
-                )
-            }
-        }
-    }
-
-    private var headerRow: some View {
-        HStack {
-            HStack(spacing: 4) {
-                Text(leftStatus.headerTitle())
-                    .font(.system(size: 11, weight: leftMostRecent ? .semibold : .regular, design: .monospaced))
-                    .foregroundStyle(leftMostRecent ? .primary : .secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                if leftStatus.isStale {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.orange)
-                }
-                if leftStatus.isRefreshing {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-
-            Spacer()
-
-            HStack(spacing: 4) {
-                if rightStatus.isRefreshing {
-                    ProgressView().controlSize(.mini)
-                }
-                if rightStatus.isStale {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.orange)
-                }
-                Text(rightStatus.headerTitle())
-                    .font(.system(size: 11, weight: rightMostRecent ? .semibold : .regular, design: .monospaced))
-                    .foregroundStyle(rightMostRecent ? .primary : .secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var gaugeRow: some View {
-        GeometryReader { geo in
-            let availableWidthPerGauge = geo.size.width / 2
-            let maxHorizontalDiameter = availableWidthPerGauge - 12
-            let maxVerticalDiameter = geo.size.height - 44
-            let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
-
-            HStack(spacing: 0) {
-                QuotaGauge(
-                    label: "WEEK",
-                    window: leftStatus.snapshot?.weeklyWindow,
-                    diameter: diameter
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                QuotaGauge(
-                    label: "WEEK",
-                    window: rightStatus.snapshot?.weeklyWindow,
-                    diameter: diameter
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -516,9 +388,21 @@ private struct ControlRow: View {
                     .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(Color.white.opacity(0.9))
                     .lineLimit(1)
+                    .help(store.transferFeedback?.detail ?? transferStatus)
             }
 
             Spacer()
+
+            Button {
+                Task { await store.syncRecentConversations() }
+            } label: {
+                Image(systemName: "arrow.left.arrow.right")
+            }
+            .disabled(store.isTransferring)
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Sync conversations from the last 10 days")
+            .help("Sync conversations from the last 10 days")
 
             Button {
                 Task { await store.refresh() }

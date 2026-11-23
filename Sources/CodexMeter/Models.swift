@@ -12,7 +12,6 @@ struct CodexProfile: Identifiable, Hashable, Sendable {
             CodexProfile(id: "codex-yot", displayName: "codex-yot", homeURL: home.appending(path: ".codex-yot")),
             CodexProfile(id: "codex-matt", displayName: "codex-matt", homeURL: home.appending(path: ".codex-matt")),
             CodexProfile(id: "codex-bio", displayName: "codex-bio", homeURL: home.appending(path: ".codex-bio")),
-            CodexProfile(id: "codex-ster", displayName: "codex-ster", homeURL: home.appending(path: ".codex-ster")),
         ]
     }()
 }
@@ -143,4 +142,5 @@ struct TransferFeedback: Equatable, Sendable {
 
     let style: Style
     let message: String
+    var detail: String? = nil
 }

@@ -47,6 +47,17 @@ Check the result at the bottom of the dashboard, then open Codex with the
 destination alias and use `/resume` to continue. To cancel before choosing a
 destination, left-click any account or press **Escape**.
 
+### Sync recent conversations across accounts
+
+Click the two arrows at the bottom of the dashboard to share conversations
+active in the last 10 days across the configured accounts. Open a destination
+alias in the project and use `/resume` to pick up a conversation. If the same
+conversation has different histories on two accounts, the sync reports the
+conflict, keeps both copies, and continues with other conversations. When
+Codex filters a copied conversation out of the destination account's
+`/resume` list, CodexMeter creates a branch under that account with the
+original conversation's last-message time.
+
 ## For agents
 
 If you are an agent, ask the user to read the [For humans](#for-humans) section.
@@ -100,8 +111,7 @@ and an executable Codex CLI at `/opt/homebrew/bin/codex`.
 The app uses a fixed profile list in
 [Models.swift](Sources/CodexMeter/Models.swift). To use different aliases in
 the app, update each relevant entry's `id`, `displayName`, and directory name
-to match the shell aliases. Keep the five entries and their order for the
-current layout, which places the final two profiles in a shared quadrant.
+to match the shell aliases. The dashboard displays up to four profiles in the order listed.
 `codex-who` discovers profiles independently and needs no source changes.
 
 From the repository root, build and open the app:
