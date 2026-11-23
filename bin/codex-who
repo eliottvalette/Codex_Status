@@ -14,10 +14,15 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zlib import crc32
 
 
 LIMIT = 10
-COLORS = ("\033[36m", "\033[35m", "\033[32m", "\033[33m", "\033[34m")
+COLORS = (
+    33, 39, 51, 77, 213, 81, 214, 141,
+    111, 117, 120, 135, 149, 153, 165, 177,
+    45, 183, 192, 203, 207, 75, 215, 221,
+)
 RESET = "\033[0m"
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
@@ -147,17 +152,14 @@ def main() -> int:
         return 0
 
     use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-    palette = {
-        profile: COLORS[index % len(COLORS)]
-        for index, profile in enumerate(sorted({item.profile for item in selected}))
-    }
     label_width = max(len(item.profile) for item in selected)
     now = time.time()
     for item in selected:
         label = item.profile.ljust(label_width)
         line = f"{label}  {age_label(item.last_message_at, now):>6}  {safe_title(item.title)}"
         if use_color:
-            line = f"{palette[item.profile]}{line}{RESET}"
+            color = COLORS[crc32(item.profile.encode("utf-8")) % len(COLORS)]
+            line = f"\033[1;38;5;{color}m{line}{RESET}"
         print(line)
     return 0
 
