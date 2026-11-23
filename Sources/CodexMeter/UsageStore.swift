@@ -11,6 +11,7 @@ final class UsageStore {
     private(set) var transferSourceID: String?
     private(set) var transferDestinationID: String?
     private(set) var transferFeedback: TransferFeedback?
+    private(set) var recentChats: [RecentClaudeChat] = []
     private var hasPendingActivationCycle = false
     private var feedbackClearTask: Task<Void, Never>?
 
@@ -19,6 +20,7 @@ final class UsageStore {
     private let clients: ProviderClients
     private let transferService: SessionTransferService
     private let claudeTransferService: ClaudeSessionTransferService
+    private let chatCatalog: ClaudeChatCatalog
     private let refreshInterval: Duration
 
     init(
@@ -27,6 +29,7 @@ final class UsageStore {
         claudeClient: ClaudeUsageClient = ClaudeUsageClient(),
         transferService: SessionTransferService = SessionTransferService(),
         claudeTransferService: ClaudeSessionTransferService = ClaudeSessionTransferService(),
+        chatCatalog: ClaudeChatCatalog = ClaudeChatCatalog(),
         refreshInterval: Duration = .seconds(120)
     ) {
         statuses = profiles.map {
@@ -42,6 +45,7 @@ final class UsageStore {
         clients = ProviderClients(codex: client, claude: claudeClient)
         self.transferService = transferService
         self.claudeTransferService = claudeTransferService
+        self.chatCatalog = chatCatalog
         self.refreshInterval = refreshInterval
     }
 
@@ -138,6 +142,62 @@ final class UsageStore {
             transferDestinationID = nil
             transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
         }
+    }
+
+    var claudeProfiles: [CodexProfile] {
+        statuses.map(\.profile).filter { $0.provider == .claude }
+    }
+
+    /// The list of recent chats only has a use when a chat can go to another account.
+    var showsRecentChats: Bool {
+        claudeProfiles.count >= 2
+    }
+
+    func reloadRecentChats() async {
+        guard showsRecentChats else {
+            recentChats = []
+            return
+        }
+        recentChats = await chatCatalog.recentChats(in: claudeProfiles)
+    }
+
+    /// Copies one conversation from the recent-chats list. The original stays where it is.
+    func copyChat(_ chat: RecentClaudeChat, to destinationID: String) async {
+        guard isTransferring == false else { return }
+        guard
+            let source = claudeProfiles.first(where: { $0.id == chat.profileID }),
+            let destination = claudeProfiles.first(where: { $0.id == destinationID })
+        else {
+            transferFeedback = TransferFeedback(
+                style: .failure,
+                message: "Unknown account: \(destinationID)"
+            )
+            return
+        }
+
+        feedbackClearTask?.cancel()
+        transferSourceID = nil
+        transferDestinationID = destination.id
+        transferFeedback = TransferFeedback(
+            style: .progress,
+            message: "Copying to \(destination.displayName)…"
+        )
+
+        do {
+            let result = try await claudeTransferService.transferSession(
+                chat.file, from: source, to: destination
+            )
+            let title = chat.title.count > 32 ? chat.title.prefix(31) + "…" : chat.title
+            let message = result.copiedCount == 0
+                ? "✓ “\(title)” already on \(destination.displayName)"
+                : "✓ “\(title)” copied to \(destination.displayName)"
+            transferFeedback = TransferFeedback(style: .success, message: message)
+            scheduleFeedbackClear()
+        } catch {
+            transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
+        }
+        transferDestinationID = nil
+        await reloadRecentChats()
     }
 
     private func scheduleFeedbackClear() {
@@ -264,6 +324,7 @@ final class UsageStore {
             }
         }
 
+        await reloadRecentChats()
         isRefreshing = false
         await handlePostRefresh()
     }

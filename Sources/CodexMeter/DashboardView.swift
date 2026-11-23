@@ -55,6 +55,12 @@ struct DashboardView: View {
                     }
                 )
             }
+            if store.showsRecentChats {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+                RecentChatsSection(store: store)
+            }
             ControlRow(store: store)
         }
         .frame(width: 640)
@@ -113,6 +119,115 @@ private struct ProfileRows: View {
             onLeftClick: onProfileLeftClick
         )
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Recent Claude chats
+
+/// The newest conversations across Claude accounts, each with a one-click copy to the
+/// other accounts. The right-click copy of the three newest still works.
+private struct RecentChatsSection: View {
+    let store: UsageStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("RECENT CHATS")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .tracking(1)
+
+            if store.recentChats.isEmpty {
+                Text("No Claude conversations yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
+                        ForEach(store.recentChats) { chat in
+                            row(chat, now: context.date)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func row(_ chat: RecentClaudeChat, now: Date) -> some View {
+        GridRow {
+            Text(displayName(chat.profileID))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Text(RecentClaudeChat.ageLabel(since: chat.lastMessageAt, relativeTo: now))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+
+            Text(chat.title)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(chat.folderName)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 110, alignment: .leading)
+
+            copyControl(chat)
+        }
+        .help(tooltip(chat))
+    }
+
+    @ViewBuilder
+    private func copyControl(_ chat: RecentClaudeChat) -> some View {
+        let destinations = store.claudeProfiles.filter { $0.id != chat.profileID }
+        if destinations.count == 1, let destination = destinations.first {
+            if chat.copiedToProfileIDs.contains(destination.id) {
+                Text("✓ \(destination.displayName)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .help("Already copied to \(destination.displayName)")
+            } else {
+                Button("→ \(destination.displayName)") {
+                    Task { await store.copyChat(chat, to: destination.id) }
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .buttonStyle(.borderless)
+                .disabled(store.isTransferring)
+                .help("Copy this conversation to \(destination.displayName)")
+            }
+        } else {
+            Menu("Copy to…") {
+                ForEach(destinations) { destination in
+                    let isCopied = chat.copiedToProfileIDs.contains(destination.id)
+                    Button(isCopied ? "✓ \(destination.displayName)" : destination.displayName) {
+                        Task { await store.copyChat(chat, to: destination.id) }
+                    }
+                    .disabled(isCopied)
+                }
+            }
+            .font(.system(size: 11))
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(store.isTransferring)
+        }
+    }
+
+    private func displayName(_ profileID: String) -> String {
+        store.claudeProfiles.first(where: { $0.id == profileID })?.displayName ?? profileID
+    }
+
+    private func tooltip(_ chat: RecentClaudeChat) -> String {
+        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)"]
+            .compactMap { $0 }
+            .joined(separator: "\n")
     }
 }
 
@@ -631,6 +746,7 @@ private struct ControlRow: View {
                     .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(Color.white.opacity(0.9))
                     .lineLimit(1)
+                    .help(transferStatus)
             }
 
             Spacer()

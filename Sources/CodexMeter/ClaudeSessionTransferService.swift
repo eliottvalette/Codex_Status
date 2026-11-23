@@ -58,6 +58,40 @@ struct ClaudeSessionTransferService: Sendable {
         let copiedCount = try Self.commit(prepared)
         return SessionTransferResult(sessionCount: sessions.count, copiedCount: copiedCount)
     }
+
+    /// Copies one conversation, chosen from the recent-chats list, with the same rules.
+    @concurrent
+    func transferSession(
+        _ file: TranscriptFile,
+        from source: CodexProfile,
+        to destination: CodexProfile
+    ) async throws -> SessionTransferResult {
+        guard source.id != destination.id else {
+            throw ClaudeSessionTransferError.sameProfile
+        }
+        // The list may be a couple of minutes old, so take the time the file has now.
+        let current: TranscriptFile
+        do {
+            let modifiedAt = try file.url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate ?? file.modifiedAt
+            current = TranscriptFile(
+                sessionID: file.sessionID,
+                projectDirectoryName: file.projectDirectoryName,
+                url: file.url,
+                modifiedAt: modifiedAt
+            )
+        } catch {
+            throw ClaudeSessionTransferError.unreadableTranscript(
+                sessionID: file.sessionID, reason: error.localizedDescription
+            )
+        }
+        guard let session = try Self.sessionRecord(for: current) else {
+            throw ClaudeSessionTransferError.noEligibleSessions(source.displayName)
+        }
+
+        let copiedCount = try Self.commit([try Self.prepareTransfer(session, to: destination)])
+        return SessionTransferResult(sessionCount: 1, copiedCount: copiedCount)
+    }
 }
 
 extension ClaudeSessionTransferService {
@@ -126,24 +160,30 @@ extension ClaudeSessionTransferService {
 
         var sessions: [SessionRecord] = []
         for file in files {
-            let data: Data
-            do {
-                data = try Data(contentsOf: file.url)
-            } catch {
-                throw ClaudeSessionTransferError.unreadableTranscript(
-                    sessionID: file.sessionID, reason: error.localizedDescription
-                )
-            }
-            // An empty transcript is a conversation that never started.
-            guard data.isEmpty == false,
-                  let lastUserMessageAt = try latestUserMessage(in: data, sessionID: file.sessionID)
-            else {
-                continue
-            }
-            sessions.append(SessionRecord(file: file, data: data, lastUserMessageAt: lastUserMessageAt))
+            guard let session = try sessionRecord(for: file) else { continue }
+            sessions.append(session)
             if sessions.count == safeLimit { break }
         }
         return sessions
+    }
+
+    /// Reads and validates one transcript. Returns `nil` when it holds no message from the user.
+    static func sessionRecord(for file: TranscriptFile) throws -> SessionRecord? {
+        let data: Data
+        do {
+            data = try Data(contentsOf: file.url)
+        } catch {
+            throw ClaudeSessionTransferError.unreadableTranscript(
+                sessionID: file.sessionID, reason: error.localizedDescription
+            )
+        }
+        // An empty transcript is a conversation that never started.
+        guard data.isEmpty == false,
+              let lastUserMessageAt = try latestUserMessage(in: data, sessionID: file.sessionID)
+        else {
+            return nil
+        }
+        return SessionRecord(file: file, data: data, lastUserMessageAt: lastUserMessageAt)
     }
 
     /// Validates a transcript and returns the time of its last message typed by the user.
@@ -162,12 +202,7 @@ extension ClaudeSessionTransferService {
                 throw ClaudeSessionTransferError.invalidTranscript(sessionID: sessionID, line: index + 1)
             }
             guard
-                record["type"] as? String == "user",
-                record["isSidechain"] as? Bool != true,
-                record["isMeta"] as? Bool != true,
-                record["isCompactSummary"] as? Bool != true,
-                let message = record["message"] as? [String: Any],
-                isTypedByUser(message["content"]),
+                isTypedUserRecord(record),
                 let timestamp = record["timestamp"] as? String,
                 let date = ClaudeTimestamp.parse(timestamp)
             else {
@@ -176,6 +211,21 @@ extension ClaudeSessionTransferService {
             if latest == nil || date > latest! { latest = date }
         }
         return latest
+    }
+
+    /// A message the user typed. Tool results, injected context, subagent turns and
+    /// compaction summaries are user-role records too, and do not count.
+    static func isTypedUserRecord(_ record: [String: Any]) -> Bool {
+        guard
+            record["type"] as? String == "user",
+            record["isSidechain"] as? Bool != true,
+            record["isMeta"] as? Bool != true,
+            record["isCompactSummary"] as? Bool != true,
+            let message = record["message"] as? [String: Any]
+        else {
+            return false
+        }
+        return isTypedByUser(message["content"])
     }
 
     private static func isTypedByUser(_ content: Any?) -> Bool {

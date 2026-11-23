@@ -113,6 +113,49 @@ struct UsageStoreClaudeTests {
         #expect(try Data(contentsOf: personal.homeURL.appending(path: "projects/-Users-me-app/s1.jsonl")) == transcript)
     }
 
+    @Test("Lists recent chats once two accounts exist and copies one from the list")
+    func copiesFromRecentChats() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let personal = try profile("claude-personal", in: home)
+        let transcript = Data(#"{"type":"user","timestamp":"2026-11-20T10:00:00Z","message":{"role":"user","content":"hello"},"cwd":"/Users/me/app"}"#.utf8) + Data("\n".utf8)
+        let sourceURL = work.homeURL.appending(path: "projects/-Users-me-app/s1.jsonl")
+        try FileManager.default.createDirectory(
+            at: sourceURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try transcript.write(to: sourceURL)
+
+        let single = try makeStore([work], home: home)
+        await single.refresh()
+        #expect(single.showsRecentChats == false)
+        #expect(single.recentChats.isEmpty)
+
+        let store = try makeStore([work, personal], home: home)
+        await store.refresh()
+        let chat = try #require(store.recentChats.first)
+        #expect(store.recentChats.count == 1)
+        #expect(chat.profileID == work.id)
+        #expect(chat.title == "hello")
+        #expect(chat.folderName == "app")
+
+        await store.copyChat(chat, to: personal.id)
+
+        #expect(store.transferFeedback == TransferFeedback(
+            style: .success, message: "✓ “hello” copied to claude-personal"
+        ))
+        #expect(store.isTransferring == false)
+        #expect(try Data(contentsOf: personal.homeURL.appending(path: "projects/-Users-me-app/s1.jsonl")) == transcript)
+        #expect(try Data(contentsOf: sourceURL) == transcript)
+        #expect(store.recentChats.map(\.profileID) == [work.id], "the copy is the same conversation")
+        #expect(store.recentChats.first?.copiedToProfileIDs == [personal.id])
+
+        await store.copyChat(chat, to: personal.id)
+        #expect(store.transferFeedback == TransferFeedback(
+            style: .success, message: "✓ “hello” already on claude-personal"
+        ))
+    }
+
     private func makeStore(_ profiles: [CodexProfile], home: URL) throws -> UsageStore {
         let executable = home.appending(path: "claude")
         try Data("#!/bin/sh\n\(fakeClaude)\n".utf8).write(to: executable)
