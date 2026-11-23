@@ -132,9 +132,10 @@ plain text. Terminal rows are bold and colored by profile.
 
 The menu bar app requires macOS 14 or newer, Xcode 26 or newer with Swift 6.2,
 and an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
-require Claude Code at `~/.local/bin/claude`, `/opt/homebrew/bin/claude`,
-`/usr/local/bin/claude`, or `~/.claude/local/claude`, in a version that
-answers the `get_usage` control request (tested with 2.1.330).
+require Claude Code 2.1.261 or newer (tested with 2.1.330) at
+`~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`,
+or `~/.claude/local/claude`. An older version cannot report usage, and the
+account's box says so. Run `claude update` to update it.
 
 The app uses a fixed profile list in
 [Models.swift](Sources/CodexMeter/Models.swift). To use different aliases in
@@ -198,7 +199,9 @@ open dist/CodexMeter.app
   session and loads no hooks, MCP servers, skills, or tools. The default
   `~/.claude` profile runs with `CLAUDE_CONFIG_DIR` unset, because Claude Code
   ties its sign-in to that variable. Claude Code marks `get_usage` as
-  experimental, so a later version may change the response.
+  experimental, so a later version may change the response. The request
+  and its `skip_behaviors` option first appear together in 2.1.261; 2.1.112
+  answers `Unsupported control request subtype`.
 - **Claude automatic activation.** A window with no reset time is idle. The
   app then runs `claude --print "Reply exactly OK." --model haiku` once and
   reads the quota again. It waits an hour before it tries the same profile
