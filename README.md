@@ -1,8 +1,9 @@
 # CodexMeter
 
-CodexMeter tracks Codex usage across local profiles in the macOS menu bar and
-copies recent conversations between profiles. The companion `codex-who` command
-shows recent conversations for the current project.
+CodexMeter tracks Codex and Claude Code usage across local profiles in the macOS
+menu bar and copies recent conversations between profiles. The companion
+`codex-who` and `claude-who` commands show recent conversations for the current
+project.
 
 ## For humans
 
@@ -13,6 +14,13 @@ history. For example, run `codex-work` to start a session on the work account
 or `codex-personal` to use the personal account. An agent can set up
 aliases with the names you choose and guide you through sign-in.
 
+### Use multiple Claude accounts
+
+Claude Code works the same way. Each alias, such as `claude-work` or
+`claude-personal`, opens Claude Code with its own sign-in, settings, and
+conversation history. The regular `claude` command keeps the account it
+already has.
+
 ### Find a recent conversation
 
 Run `codex-who` from the project folder whenever you need to find a thread.
@@ -21,11 +29,15 @@ profiles, with the alias, title, and time since your last message. Each row
 uses the account's color, so you can see which alias to open and use
 `/resume` to pick up the conversation.
 
+Run `claude-who` for the same list of Claude Code conversations.
+
 ### Track quotas and reset times
 
-The Codex gauge in the macOS menu bar shows the lowest quota remaining.
-Click it to see each account's quota and the time until its next reset,
-when Codex provides one.
+The gauge in the macOS menu bar shows the lowest quota remaining and names
+the provider it belongs to. Click it to see each account's quota and the time
+until its next reset, when the provider reports one. Claude accounts appear
+below the Codex accounts, two to a row, each with its five-hour and weekly
+quota.
 
 - **Automatic refresh.** Quotas update when the app opens, when the Mac wakes
   from sleep, and about every two minutes while the app runs. Use the refresh
@@ -34,7 +46,8 @@ when Codex provides one.
 - **Automatic activation.** When a refresh detects an idle quota window,
   the app can send a short background request to start the window and
   check for a reset time. The request runs in a temporary conversation
-  and can use a small amount of quota.
+  and can use a small amount of quota. For a Claude account, the request
+  goes to the smallest model, at most once an hour.
 
 ### Continue a conversation on another account
 
@@ -46,6 +59,10 @@ and the originals remain available.
 Check the result at the bottom of the dashboard, then open Codex with the
 destination alias and use `/resume` to continue. To cancel before choosing a
 destination, left-click any account or press **Escape**.
+
+Conversations move between accounts of the same provider: Codex to Codex, or
+Claude to Claude. Open Claude Code from the same project folder to find a
+copied conversation in `/resume`.
 
 ## For agents
 
@@ -76,14 +93,33 @@ With `CODEX_HOME` unset, the regular `codex` command uses `~/.codex`.
 Run an alias such as `codex-work` from a project directory to start a
 conversation under that profile.
 
-### Install `codex-who`
+A Claude Code profile is a directory selected through `CLAUDE_CONFIG_DIR`.
+Name each directory `~/.claude-<name>` so the app and `claude-who` can find it:
 
-From the repository root, install the command and add its directory to your
-shell's `PATH`. The command requires Python 3.10 or newer.
+```zsh
+alias claude-work='CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude'
+alias claude-personal='CLAUDE_CONFIG_DIR="$HOME/.claude-personal" claude'
+```
+
+Reload the shell configuration, then run each alias once and sign in with
+`/login`. Check the sign-in status:
+
+```zsh
+claude-work auth status
+claude-personal auth status
+```
+
+With `CLAUDE_CONFIG_DIR` unset, the regular `claude` command uses `~/.claude`.
+
+### Install `codex-who` and `claude-who`
+
+From the repository root, install the commands and add their directory to your
+shell's `PATH`. The commands require Python 3.10 or newer.
 
 ```zsh
 mkdir -p "$HOME/.local/bin"
 ln -s "$PWD/bin/codex-who" "$HOME/.local/bin/codex-who"
+ln -s "$PWD/bin/claude-who" "$HOME/.local/bin/claude-who"
 ```
 
 If needed, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` and run
@@ -95,7 +131,10 @@ plain text. Terminal rows are bold and colored by profile.
 ### Build and configure the menu bar app
 
 The menu bar app requires macOS 14 or newer, Xcode 26 or newer with Swift 6.2,
-and an executable Codex CLI at `/opt/homebrew/bin/codex`.
+and an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
+require Claude Code at `~/.local/bin/claude`, `/opt/homebrew/bin/claude`,
+`/usr/local/bin/claude`, or `~/.claude/local/claude`, in a version that
+answers the `get_usage` control request (tested with 2.1.330).
 
 The app uses a fixed profile list in
 [Models.swift](Sources/CodexMeter/Models.swift). To use different aliases in
@@ -103,6 +142,13 @@ the app, update each relevant entry's `id`, `displayName`, and directory name
 to match the shell aliases. Keep the five entries and their order for the
 current layout, which places the final two profiles in a shared quadrant.
 `codex-who` discovers profiles independently and needs no source changes.
+
+Claude profiles need no source changes. At launch the app adds `~/.claude` and
+every `~/.claude-*` directory that contains `projects` or `.claude.json`. When
+it finds Claude profiles and none of the Codex directories exist, it leaves
+the Codex accounts out. To stop the app from starting idle Claude windows, set
+`automaticActivation` to `false` in
+[ClaudeProfiles.swift](Sources/CodexMeter/ClaudeProfiles.swift).
 
 From the repository root, build and open the app:
 
@@ -137,9 +183,37 @@ open dist/CodexMeter.app
   already exists. App Server indexes new or repaired conversations for
   `/resume`, and failures appear in the dashboard footer.
 
+- **Claude profiles and activity.** A profile's conversations are the
+  transcripts at `projects/<project>/<session-id>.jsonl`, where `<project>`
+  is the working directory with every character outside `A-Z`, `a-z`, and
+  `0-9` replaced by a hyphen. Subagent transcripts are ignored. `claude-who`
+  reads the folder for the current directory in every `~/.claude*` profile
+  and sorts by the last message the user typed. A record still being written
+  is skipped. A malformed record is an error.
+- **Claude usage status.** Each refresh starts `claude --print` in stream-JSON
+  mode with the profile's `CLAUDE_CONFIG_DIR` and sends one `get_usage`
+  control request. Claude Code answers with the five-hour and weekly
+  utilization of the signed-in plan. No prompt is sent, so the read uses no
+  quota, and the app never reads the stored credentials. The run saves no
+  session and loads no hooks, MCP servers, skills, or tools. The default
+  `~/.claude` profile runs with `CLAUDE_CONFIG_DIR` unset, because Claude Code
+  ties its sign-in to that variable. Claude Code marks `get_usage` as
+  experimental, so a later version may change the response.
+- **Claude automatic activation.** A window with no reset time is idle. The
+  app then runs `claude --print "Reply exactly OK." --model haiku` once and
+  reads the quota again. It waits an hour before it tries the same profile
+  again.
+- **Claude transfer behavior.** The app copies the three most recently changed
+  conversations to the same `projects/<project>/` path in the destination and
+  keeps their modification times. Claude Code lists conversations by reading
+  that folder, so no indexing step follows. Replacement, skipping, and
+  divergent histories follow the Codex rules above. Subagent transcripts and
+  saved tool output stay in the source profile.
+
 Run the checks from the repository root:
 
 ```sh
 swift test
 python3 -B -m unittest discover -s Tests/CodexWhoTests
+python3 -B -m unittest discover -s Tests/ClaudeWhoTests
 ```

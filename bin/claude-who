@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+
+"""Show recent Claude Code conversations for the current directory."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from zlib import crc32
+
+
+LIMIT = 10
+MAX_PROJECT_NAME = 200
+MAX_TITLE = 100
+COLORS = (
+    33, 39, 51, 77, 213, 81, 214, 141,
+    111, 117, 120, 135, 149, 153, 165, 177,
+    45, 183, 192, 203, 207, 75, 215, 221,
+)
+RESET = "\033[0m"
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Only these records carry a user message or a title. Skipping the rest keeps large
+# transcripts fast to read.
+RELEVANT_RECORD = re.compile(r'"type"\s*:\s*"(?:user|custom-title|ai-title|summary)"')
+TITLE_FIELDS = {"custom-title": "customTitle", "ai-title": "aiTitle", "summary": "summary"}
+TITLE_PRIORITY = ("custom-title", "ai-title", "summary")
+
+
+@dataclass(frozen=True)
+class Conversation:
+    profile: str
+    last_message_at: float
+    title: str
+
+
+def profiles(home: Path) -> list[tuple[str, Path]]:
+    found = [
+        (directory.name.lstrip("."), directory / "projects")
+        for directory in home.glob(".claude*")
+        if (directory.name == ".claude" or directory.name.startswith(".claude-"))
+        and (directory / "projects").is_dir()
+    ]
+    if not found:
+        raise RuntimeError(f"No Claude Code profiles found under {home}.")
+    return sorted(found)
+
+
+def project_directory_name(cwd: Path) -> str:
+    """Name the folder the way Claude Code does: one hyphen per UTF-16 unit outside A-Z, a-z, 0-9."""
+    return "".join(
+        character if character.isascii() and character.isalnum()
+        else "-" * (len(character.encode("utf-16-le")) // 2)
+        for character in str(cwd)
+    )
+
+
+def project_directories(projects: Path, cwd: Path) -> list[Path]:
+    name = project_directory_name(cwd)
+    if len(name) <= MAX_PROJECT_NAME:
+        directory = projects / name
+        return [directory] if directory.is_dir() else []
+    # Claude Code cuts long names and adds a hash. The saved working directory settles it.
+    prefix = name[:MAX_PROJECT_NAME] + "-"
+    return sorted(
+        directory for directory in projects.iterdir()
+        if directory.is_dir() and directory.name.startswith(prefix)
+    )
+
+
+def typed_by_user(record: dict) -> bool:
+    """Tool results, injected context and subagent turns are user-role records too."""
+    if record.get("isSidechain") or record.get("isMeta") or record.get("isCompactSummary"):
+        return False
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return bool(content)
+    if isinstance(content, list):
+        return any(isinstance(block, dict) and block.get("type") != "tool_result" for block in content)
+    return False
+
+
+def prompt_text(record: dict) -> str:
+    content = record["message"]["content"]
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        block.get("text", "") for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def read_conversation(transcript: Path, cwd: Path) -> tuple[float, str] | None:
+    """Return the last user-message time and the title, or None when there is no user message here."""
+    last_timestamp = None
+    titles: dict[str, str] = {}
+    first_prompt = ""
+    saved_cwd = None
+    try:
+        with transcript.open(encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                if not RELEVANT_RECORD.search(line):
+                    continue
+                if not line.endswith("\n"):
+                    break  # Claude Code is still writing this record.
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(
+                        f"Invalid JSON in {transcript} on line {line_number}: {error}"
+                    ) from error
+                if not isinstance(record, dict):
+                    continue
+                kind = record.get("type")
+                if kind in TITLE_FIELDS:
+                    title = record.get(TITLE_FIELDS[kind])
+                    if isinstance(title, str) and title.strip():
+                        titles[kind] = title
+                    continue
+                if kind != "user" or not typed_by_user(record):
+                    continue
+                if saved_cwd is None and isinstance(record.get("cwd"), str):
+                    saved_cwd = record["cwd"]
+                timestamp = record.get("timestamp")
+                if not isinstance(timestamp, str):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                except ValueError as error:
+                    raise RuntimeError(
+                        f"Invalid user-message timestamp in {transcript} on line {line_number}: {timestamp}"
+                    ) from error
+                if parsed.tzinfo is None:
+                    raise RuntimeError(
+                        f"User-message timestamp has no timezone in {transcript} on line {line_number}: {timestamp}"
+                    )
+                observed_at = parsed.timestamp()
+                last_timestamp = observed_at if last_timestamp is None else max(last_timestamp, observed_at)
+                if not first_prompt:
+                    first_prompt = prompt_text(record)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(f"Could not read {transcript}: {error}") from error
+
+    if last_timestamp is None:
+        return None
+    if len(project_directory_name(cwd)) > MAX_PROJECT_NAME and saved_cwd != str(cwd):
+        return None
+    title = next((titles[kind] for kind in TITLE_PRIORITY if kind in titles), "")
+    return last_timestamp, title or first_prompt or "[untitled]"
+
+
+def recent_conversations(profile: str, projects: Path, cwd: Path) -> list[Conversation]:
+    transcripts = []
+    for directory in project_directories(projects, cwd):
+        for transcript in directory.glob("*.jsonl"):
+            # Older versions kept subagent transcripts here with an agent- prefix.
+            if transcript.name.startswith("agent-"):
+                continue
+            try:
+                if transcript.is_file():
+                    transcripts.append((transcript.stat().st_mtime, transcript))
+            except FileNotFoundError:
+                continue
+
+    # A transcript changes when a message is added, so its last user message is never
+    # later than its modification time. Reading newest first allows an early stop.
+    conversations: list[Conversation] = []
+    for modified_at, transcript in sorted(transcripts, reverse=True):
+        if len(conversations) >= LIMIT:
+            cutoff = sorted(item.last_message_at for item in conversations)[-LIMIT]
+            if modified_at < cutoff:
+                break
+        found = read_conversation(transcript, cwd)
+        if found is not None:
+            conversations.append(Conversation(profile, *found))
+    return conversations
+
+
+def age_label(last_message_at: float, now: float) -> str:
+    elapsed = max(0, int(now - last_message_at))
+    if elapsed < 60:
+        return "now"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m"
+    if elapsed < 86400:
+        return f"{elapsed // 3600}h"
+    return f"{elapsed // 86400}d {(elapsed % 86400) // 3600}h"
+
+
+def safe_title(value: str) -> str:
+    title = " ".join(CONTROL_CHARACTERS.sub(" ", value).split())
+    return title if len(title) <= MAX_TITLE else title[: MAX_TITLE - 1] + "…"
+
+
+def main() -> int:
+    cwd = Path.cwd().resolve()
+    conversations = [
+        conversation
+        for profile, projects in profiles(Path.home())
+        for conversation in recent_conversations(profile, projects, cwd)
+    ]
+    conversations.sort(key=lambda item: item.last_message_at, reverse=True)
+    selected = conversations[:LIMIT]
+    if not selected:
+        print(f"No Claude Code conversations found for {cwd}.")
+        return 0
+
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    label_width = max(len(item.profile) for item in selected)
+    now = time.time()
+    for item in selected:
+        label = item.profile.ljust(label_width)
+        line = f"{label}  {age_label(item.last_message_at, now):>6}  {safe_title(item.title)}"
+        if use_color:
+            color = COLORS[crc32(item.profile.encode("utf-8")) % len(COLORS)]
+            line = f"\033[1;38;5;{color}m{line}{RESET}"
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError) as error:
+        print(f"claude-who: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
