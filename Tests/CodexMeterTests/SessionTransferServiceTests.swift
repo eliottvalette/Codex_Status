@@ -148,6 +148,34 @@ struct SessionTransferServiceTests {
         ))
     }
 
+    @Test("Persists successful comparisons and invalidates changed parents and index rows")
+    func invalidatesPersistedComparison() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profile = CodexProfile(id: "destination", displayName: "Destination", homeURL: directory)
+        let parent = directory.appending(path: "parent.jsonl")
+        try Data("original".utf8).write(to: parent)
+        let stamp = try #require(SyncComparisonCache.FileStamp.read(parent.path))
+        let indexed = SyncComparisonCache.IndexedRollout(path: "/destination", updated: 42, recency: 42)
+        let entry = SyncComparisonCache.Entry(
+            sourcePath: "/source", destination: indexed, files: [parent.path: stamp],
+            indexedParents: ["parent": parent.path], historySegments: ["segment": parent.path]
+        )
+        let cache = SyncComparisonCache(sources: ["profile": ["thread": entry]])
+        try cache.save(in: profile)
+        let recovered = try #require(SyncComparisonCache.read(in: profile).sources["profile"]?["thread"])
+
+        let parents = ["parent": parent.path]
+        let segments = ["segment": [parent.path]]
+        #expect(recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents, historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: nil, indexedParents: parents, historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: [:], historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents,
+                                  historySegments: ["segment": [parent.path, "/duplicate"]]))
+        try Data("modified".utf8).write(to: parent)
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents, historySegments: segments))
+    }
+
     @Test("Divergent conversations follow user request recency rather than file size", arguments: [true, false])
     func comparesDivergentRequestTimestamps(sourceNewer: Bool) throws {
         func data(_ date: String, _ message: String) -> Data {

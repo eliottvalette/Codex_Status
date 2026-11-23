@@ -165,11 +165,42 @@ struct SessionTransferService: Sendable {
         } else {
             destinationRecords = [:]
         }
-        let selectedPaths = Set(sessions.map(\.rolloutPath))
+        let comparisonKey = source.homeURL.resolvingSymlinksInPath().path
+        var comparisonCache: SyncComparisonCache?
+        if let onSyncIssue {
+            do {
+                comparisonCache = try SyncComparisonCache.read(in: destination)
+            } catch {
+                onSyncIssue("Could not read the comparison cache: \(error.localizedDescription)")
+                comparisonCache = SyncComparisonCache()
+            }
+        }
+        let indexedRollouts = comparisonCache == nil ? [:] : try Self.cacheIndexedRollouts(in: destination)
+        let entries = comparisonCache?.sources[comparisonKey] ?? [:]
+        let availablePaths = Dictionary((availableSessions + sessions).map { ($0.id, $0.rolloutPath) }) { _, selected in selected }
+        let segmentIDs = Set(entries.values.flatMap { $0.historySegments.keys })
+        let segmentPaths = segmentIDs.isEmpty ? [:] : try Self.cacheSegmentPaths(segmentIDs, in: source)
+        let cached = sessions.filter { session in
+            entries[session.id]?.matches(
+                sourcePath: session.rolloutPath,
+                destination: indexedRollouts[session.id],
+                indexedParents: availablePaths,
+                historySegments: segmentPaths
+            ) == true
+        }
+        let cachedIDs = Set(cached.map(\.id))
+        for session in cached {
+            if let issue = entries[session.id]?.issue {
+                onSyncIssue?(issue)
+            }
+        }
+        let pending = sessions.filter { !cachedIDs.contains($0.id) }
+        let selectedPaths = Set(pending.map(\.rolloutPath))
         var detachedPaths: [String: String] = [:]
+        var conflicts: [String: SyncComparisonCache.Entry] = [:]
         var prepared = try Self.prepareTransferClosure(
-            selected: sessions,
-            available: availableSessions,
+            selected: pending,
+            available: availableSessions + cached,
             from: source,
             to: destination,
             validate: { item in
@@ -190,12 +221,25 @@ struct SessionTransferService: Sendable {
                    !existing.starts(with: item.sourceData),
                    !item.sourceData.starts(with: existing) {
                     guard Self.sameHistoryWithLocalSettings(item.sourceData, existing) else {
-                        throw SessionTransferError.divergentHistory(item.session.id)
+                        let error = SessionTransferError.divergentHistory(item.session.id)
+                        if selectedPaths.contains(item.session.rolloutPath),
+                           let indexed = indexedRollouts[item.session.id], item.comparisonStamps.count == 2,
+                           indexed.path == destinationRecords[item.session.id]?.rolloutPath,
+                           URL(fileURLWithPath: indexed.path).resolvingSymlinksInPath()
+                            == item.destinationURL.resolvingSymlinksInPath() {
+                            conflicts[item.session.id] = SyncComparisonCache.Entry(
+                                sourcePath: item.session.rolloutPath, destination: indexed,
+                                files: item.comparisonStamps, indexedParents: [:], historySegments: [:],
+                                issue: "\(item.session.name ?? item.session.id): \(error.localizedDescription)"
+                            )
+                        }
+                        throw error
                     }
                     item.disposition = .alreadyPresent
                 }
             },
-            onSkippedSession: onSyncIssue
+            onSkippedSession: onSyncIssue,
+            captureStamps: comparisonCache != nil
         )
         let selected = prepared.filter { selectedPaths.contains($0.session.rolloutPath) }
         let selectedIDs = Set(selected.map(\.session.id))
@@ -216,7 +260,7 @@ struct SessionTransferService: Sendable {
             return transfer.session
         }
         if let onSyncIssue {
-            for session in sessions where !selectedIDs.contains(session.id) && !copiedIDs.contains(session.id) {
+            for session in pending where !selectedIDs.contains(session.id) && !copiedIDs.contains(session.id) {
                 guard let record = destinationRecords[session.id] else { continue }
                 do {
                     let rollout = URL(fileURLWithPath: record.rolloutPath).resolvingSymlinksInPath()
@@ -260,8 +304,41 @@ struct SessionTransferService: Sendable {
             )
         }
 
+        if var comparisonCache, let onSyncIssue {
+            do {
+                let finalIndex = try Self.cacheIndexedRollouts(in: destination)
+                var retained: [String: SyncComparisonCache.Entry] = [:]
+                for session in cached {
+                    if let entry = entries[session.id], entry.destination == finalIndex[session.id] {
+                        retained[session.id] = entry
+                    }
+                }
+                for (id, entry) in conflicts
+                where entry.destination == finalIndex[id]
+                    && entry.files.allSatisfy({ SyncComparisonCache.FileStamp.read($0.key) == $0.value }) {
+                    retained[id] = entry
+                }
+                let byPath = Dictionary(uniqueKeysWithValues: prepared.map { ($0.session.rolloutPath, $0) })
+                let bySegment = Dictionary(grouping: prepared, by: { Self.segmentIdentifier(for: $0.session.rolloutPath) })
+                for item in selected where detachedPaths[item.session.id] == nil {
+                    guard let indexed = finalIndex[item.session.id],
+                          URL(fileURLWithPath: indexed.path).resolvingSymlinksInPath()
+                            == item.destinationURL.resolvingSymlinksInPath(),
+                          let entry = Self.cacheEntry(
+                            for: item, destination: indexed, byPath: byPath,
+                            bySegment: bySegment, indexedParents: availablePaths
+                          ) else { continue }
+                    retained[item.session.id] = entry
+                }
+                comparisonCache.sources[comparisonKey] = retained
+                try comparisonCache.save(in: destination)
+            } catch {
+                onSyncIssue("Could not save the comparison cache: \(error.localizedDescription)")
+            }
+        }
+
         return SessionTransferResult(
-            sessionCount: selected.count,
+            sessionCount: selected.count + cached.count,
             copiedCount: indexedSessions.count { requestedIDs.contains($0.id) },
             pickerImportsCount: pickerImportsCount
         )
@@ -303,6 +380,7 @@ extension SessionTransferService {
         var requiresIndex = false
         var destinationData: Data? = nil
         var sourceModificationDate: Date? = nil
+        var comparisonStamps: [String: SyncComparisonCache.FileStamp] = [:]
     }
 
     static func recentSessions(for profile: CodexProfile, limit: Int) throws -> [SessionRecord] {
@@ -558,13 +636,88 @@ extension SessionTransferService {
         }
     }
 
+    private static func cacheIndexedRollouts(in profile: CodexProfile) throws -> [String: SyncComparisonCache.IndexedRollout] {
+        let database = profile.homeURL.appending(path: "state_5.sqlite")
+        guard FileManager.default.fileExists(atPath: database.path) else { return [:] }
+        struct Row: Decodable {
+            let id: String
+            let path: String
+            let updated: Int64
+            let recency: Int64
+        }
+        let data = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: """
+                SELECT id, rollout_path AS path, COALESCE(updated_at_ms, updated_at * 1000) AS updated,
+                       recency_at_ms AS recency
+                FROM threads WHERE archived = 0 AND preview <> '';
+                """,
+            outputJSON: true
+        )
+        let rows = try JSONDecoder().decode([Row].self, from: data)
+        return Dictionary(uniqueKeysWithValues: rows.map {
+            ($0.id, SyncComparisonCache.IndexedRollout(path: $0.path, updated: $0.updated, recency: $0.recency))
+        })
+    }
+
+    private static func segmentIdentifier(for path: String) -> String {
+        String(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.suffix(36))
+    }
+
+    private static func cacheSegmentPaths(_ ids: Set<String>, in profile: CodexProfile) throws -> [String: [String]] {
+        var paths: [String: [String]] = [:]
+        for url in try sourceRolloutURLs(in: profile) {
+            let id = segmentIdentifier(for: url.path)
+            if ids.contains(id) { paths[id, default: []].append(url.path) }
+        }
+        return paths
+    }
+
+    private static func cacheEntry(
+        for root: PreparedTransfer,
+        destination: SyncComparisonCache.IndexedRollout,
+        byPath: [String: PreparedTransfer],
+        bySegment: [String: [PreparedTransfer]],
+        indexedParents: [String: String]
+    ) -> SyncComparisonCache.Entry? {
+        var files: [String: SyncComparisonCache.FileStamp] = [:]
+        var parents: [String: String] = [:]
+        var segments: [String: String] = [:]
+        var visited: Set<String> = []
+        var current = root
+        while true {
+            guard visited.insert(current.session.rolloutPath).inserted,
+                  current.disposition == .alreadyPresent, !current.requiresIndex,
+                  current.comparisonStamps.count == 2 else { return nil }
+            for (path, stamp) in current.comparisonStamps {
+                guard SyncComparisonCache.FileStamp.read(path) == stamp else { return nil }
+                files[path] = stamp
+            }
+            if let id = current.historyBaseThreadID {
+                guard let matches = bySegment[id], matches.count == 1, let parent = matches.first else { return nil }
+                segments[id] = parent.session.rolloutPath
+                current = parent
+            } else if let id = current.sourceThreadID {
+                guard let path = indexedParents[id], let parent = byPath[path] else { return nil }
+                parents[id] = path
+                current = parent
+            } else {
+                return SyncComparisonCache.Entry(
+                    sourcePath: root.session.rolloutPath, destination: destination,
+                    files: files, indexedParents: parents, historySegments: segments
+                )
+            }
+        }
+    }
+
     static func prepareTransferClosure(
         selected: [SessionRecord],
         available: [SessionRecord],
         from source: CodexProfile,
         to destination: CodexProfile,
         validate: (inout PreparedTransfer) throws -> Void = { _ in },
-        onSkippedSession: ((String) -> Void)? = nil
+        onSkippedSession: ((String) -> Void)? = nil,
+        captureStamps: Bool = false
     ) throws -> [PreparedTransfer] {
         let recordsByID = Dictionary((available + selected).map { ($0.id, $0) }) { _, selected in selected }
         var preparedByPath: [String: PreparedTransfer] = [:]
@@ -609,7 +762,7 @@ extension SessionTransferService {
             }
             defer { visiting.remove(path) }
 
-            var transfer = try prepareTransfer(session, from: source, to: destination)
+            var transfer = try prepareTransfer(session, from: source, to: destination, captureStamps: captureStamps)
             try validate(&transfer)
             transfer.requiresIndex = transfer.disposition != .alreadyPresent
             if let segmentID = transfer.historyBaseThreadID {
@@ -678,7 +831,8 @@ extension SessionTransferService {
     static func prepareTransfer(
         _ session: SessionRecord,
         from source: CodexProfile,
-        to destination: CodexProfile
+        to destination: CodexProfile,
+        captureStamps: Bool = false
     ) throws -> PreparedTransfer {
         let sourceURL = URL(fileURLWithPath: session.rolloutPath).standardizedFileURL
         let sourceRoot = source.homeURL.standardizedFileURL
@@ -691,6 +845,15 @@ extension SessionTransferService {
 
         let relativePath = String(sourceURL.path.dropFirst(sourceRoot.path.count + 1))
         let destinationURL = destination.homeURL.appending(path: relativePath).standardizedFileURL
+        var stamps: [String: SyncComparisonCache.FileStamp] = [:]
+        if captureStamps {
+            if let stamp = SyncComparisonCache.FileStamp.read(session.rolloutPath) {
+                stamps[session.rolloutPath] = stamp
+            }
+            if let stamp = SyncComparisonCache.FileStamp.read(destinationURL.path) {
+                stamps[destinationURL.path] = stamp
+            }
+        }
         let data: Data
         do {
             data = try Data(contentsOf: sourceURL)
@@ -716,7 +879,8 @@ extension SessionTransferService {
             historyBaseThreadID: metadata.historyBaseThreadID,
             destinationData: destinationData,
             sourceModificationDate: try sourceURL.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate
+                .contentModificationDate,
+            comparisonStamps: stamps
         )
     }
 
