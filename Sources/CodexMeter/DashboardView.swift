@@ -744,7 +744,7 @@ private struct ControlRow: View {
             if let transferStatus {
                 Text(transferStatus)
                     .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                     .help(transferStatus)
             }
