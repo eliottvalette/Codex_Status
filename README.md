@@ -37,7 +37,9 @@ The gauge in the macOS menu bar shows the lowest quota remaining and names
 the provider it belongs to. Click it to see each account's quota and the time
 until its next reset, when the provider reports one. Claude accounts appear
 below the Codex accounts, two to a row, each with its five-hour and weekly
-quota.
+quota. When a plan also limits a single model each week, such as
+"Weekly · Fable" in Claude's usage panel, a third ring shows the tightest of
+those limits, and the menu bar figure counts it.
 
 - **Automatic refresh.** Quotas update when the app opens, when the Mac wakes
   from sleep, and about every two minutes while the app runs. Use the refresh
@@ -63,6 +65,14 @@ destination, left-click any account or press **Escape**.
 Conversations move between accounts of the same provider: Codex to Codex, or
 Claude to Claude. Open Claude Code from the same project folder to find a
 copied conversation in `/resume`.
+
+With two or more Claude accounts, **Recent chats** below the accounts lists
+the eight newest Claude conversations across them, with the account, the time
+since your last message, the title, and the project folder. Click
+**→ account** on a row to copy that one conversation; with three or more
+accounts, choose the destination from **Copy to…**. A conversation that
+already has an identical copy on another account is listed once, with a ✓
+next to that account.
 
 ## For agents
 
@@ -132,7 +142,7 @@ plain text. Terminal rows are bold and colored by profile.
 
 The menu bar app requires macOS 14 or newer, Xcode 26 or newer with Swift 6.2,
 and an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
-require Claude Code 2.1.261 or newer (tested with 2.1.330) at
+require Claude Code 2.1.261 or newer (tested with 2.1.331) at
 `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`,
 or `~/.claude/local/claude`. An older version cannot report usage, and the
 account's box says so. Run `claude update` to update it.
@@ -206,9 +216,18 @@ open dist/CodexMeter.app
   app then runs `claude --print "Reply exactly OK." --model haiku` once and
   reads the quota again. It waits an hour before it tries the same profile
   again.
+- **Claude recent chats.** The list reads the transcripts of every Claude
+  profile, newest first, and sorts them by the last message the user typed, as
+  `claude-who` does. The title is the custom title, then the AI title, then the
+  summary, then the first prompt. A transcript is read again only when its
+  modification time or size changes. Only lines whose record type, written near
+  the start of the line, marks a title or a prompt are parsed; tool results,
+  most of a long transcript, are skipped unparsed. A copy counts as identical
+  when its size and modification time match the original's.
 - **Claude transfer behavior.** The app copies the three most recently changed
-  conversations to the same `projects/<project>/` path in the destination and
-  keeps their modification times. Claude Code lists conversations by reading
+  conversations, or the one chosen in Recent chats, to the same
+  `projects/<project>/` path in the destination and keeps their modification
+  times. Claude Code lists conversations by reading
   that folder, so no indexing step follows. Replacement, skipping, and
   divergent histories follow the Codex rules above. Subagent transcripts and
   saved tool output stay in the source profile.
