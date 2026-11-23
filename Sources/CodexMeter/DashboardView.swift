@@ -219,7 +219,8 @@ private struct AliasQuadrant: View {
                 profileID: status.id,
                 isEnabled: status.errorMessage == nil || status.snapshot != nil,
                 onRightClick: onRightClick,
-                onLeftClick: onLeftClick
+                onLeftClick: onLeftClick,
+                toolTip: status.errorMessage
             )
         }
     }
@@ -249,12 +250,21 @@ private struct AliasQuadrant: View {
 
     @ViewBuilder
     private var gaugeRow: some View {
-        if status.errorMessage != nil, status.snapshot == nil {
+        if let message = status.errorMessage, status.snapshot == nil {
+            // No reading yet: a smaller ring leaves room to say why.
             GeometryReader { geo in
-                let diameter = max(50, min(78, min(geo.size.width / 2 - 12, geo.size.height - 44)))
-                QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityLabel("Account unavailable")
+                let diameter = max(50, min(64, min(geo.size.width / 2 - 12, geo.size.height - 84)))
+                VStack(spacing: 4) {
+                    QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
+                        .accessibilityLabel("Account unavailable")
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
             // Profile has no 5H quota — ring fills available space
@@ -402,6 +412,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
     let isEnabled: Bool
     let onRightClick: (String) -> Void
     let onLeftClick: () -> Void
+    var toolTip: String? = nil
 
     func makeNSView(context: Context) -> ProfileClickView {
         ProfileClickView()
@@ -412,6 +423,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
             if isEnabled { onRightClick(profileID) }
         }
         nsView.onLeftClick = onLeftClick
+        nsView.toolTip = toolTip
     }
 
     final class ProfileClickView: NSView {
