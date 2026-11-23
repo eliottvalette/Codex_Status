@@ -120,8 +120,29 @@ enum ClaudeUsageParser {
             weeklyWindow: window(
                 rateLimits["seven_day"], durationMinutes: weeklyWindowMinutes, fetchedAt: fetchedAt
             ),
+            modelWindows: modelWindows(rateLimits, fetchedAt: fetchedAt),
             fetchedAt: fetchedAt
         )
+    }
+
+    /// Weekly limits for single models. Newer replies list them under `model_scoped`;
+    /// the Opus and Sonnet fields are the older form of the same thing.
+    private static func modelWindows(_ rateLimits: [String: Any], fetchedAt: Date) -> [ModelQuotaWindow] {
+        var windows: [ModelQuotaWindow] = []
+        func add(_ name: String, _ value: Any?) {
+            guard
+                name.isEmpty == false,
+                windows.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) == false,
+                let window = window(value, durationMinutes: weeklyWindowMinutes, fetchedAt: fetchedAt)
+            else { return }
+            windows.append(ModelQuotaWindow(name: name, window: window))
+        }
+        for case let entry as [String: Any] in rateLimits["model_scoped"] as? [Any] ?? [] {
+            add(entry["display_name"] as? String ?? "", entry)
+        }
+        add("Opus", rateLimits["seven_day_opus"])
+        add("Sonnet", rateLimits["seven_day_sonnet"])
+        return windows
     }
 
     /// Returns `true` once the final result of the activation request arrives.

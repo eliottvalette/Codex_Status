@@ -95,10 +95,22 @@ enum WindowClassifier {
     }
 }
 
+/// A weekly limit that applies to one model only, such as Claude's "Weekly · Fable".
+struct ModelQuotaWindow: Equatable, Sendable {
+    let name: String
+    let window: QuotaWindow
+
+    /// Short enough to sit above a ring.
+    var label: String {
+        String(name.uppercased().prefix(7))
+    }
+}
+
 struct QuotaSnapshot: Equatable, Sendable {
     let planType: String?
     let shortWindow: QuotaWindow?
     let weeklyWindow: QuotaWindow?
+    let modelWindows: [ModelQuotaWindow]
     let availableResetCredits: Int?
     let earliestResetCreditExpiresAt: Date?
     let fetchedAt: Date
@@ -107,6 +119,7 @@ struct QuotaSnapshot: Equatable, Sendable {
         planType: String?,
         shortWindow: QuotaWindow?,
         weeklyWindow: QuotaWindow?,
+        modelWindows: [ModelQuotaWindow] = [],
         availableResetCredits: Int? = nil,
         earliestResetCreditExpiresAt: Date? = nil,
         fetchedAt: Date
@@ -114,9 +127,17 @@ struct QuotaSnapshot: Equatable, Sendable {
         self.planType = planType
         self.shortWindow = shortWindow
         self.weeklyWindow = weeklyWindow
+        self.modelWindows = modelWindows
         self.availableResetCredits = availableResetCredits
         self.earliestResetCreditExpiresAt = earliestResetCreditExpiresAt
         self.fetchedAt = fetchedAt
+    }
+
+    /// The per-model window with the least left, among those in use.
+    var tightestModelWindow: ModelQuotaWindow? {
+        modelWindows
+            .filter { $0.window.state != .dormant }
+            .min(by: { $0.window.remainingPercent < $1.window.remainingPercent })
     }
 }
 
@@ -176,13 +197,13 @@ struct LowestRemainingQuota: Equatable, Sendable {
         statuses
             .flatMap { status -> [LowestRemainingQuota] in
                 guard let snapshot = status.snapshot else { return [] }
-                return [snapshot.shortWindow, snapshot.weeklyWindow].compactMap { window in
-                    window.map {
-                        LowestRemainingQuota(
-                            provider: status.profile.provider,
-                            percent: Int($0.remainingPercent.rounded())
-                        )
-                    }
+                let windows = [snapshot.shortWindow, snapshot.weeklyWindow].compactMap { $0 }
+                    + snapshot.modelWindows.map(\.window)
+                return windows.map {
+                    LowestRemainingQuota(
+                        provider: status.profile.provider,
+                        percent: Int($0.remainingPercent.rounded())
+                    )
                 }
             }
             .min(by: { $0.percent < $1.percent })

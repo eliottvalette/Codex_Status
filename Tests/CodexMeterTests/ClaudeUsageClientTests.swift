@@ -77,6 +77,54 @@ struct ClaudeUsageClientTests {
         #expect(window.resetsAt == nil)
     }
 
+    @Test("Reads the weekly limits of single models and picks the tightest one in use")
+    func parsesModelWindows() throws {
+        let line = response("""
+            "response":{"subscription_type":"max","rate_limits_available":true,
+            "rate_limits":{"five_hour":null,
+            "seven_day":{"utilization":75,"resets_at":"2025-11-06T03:59:59+00:00","limit_dollars":null,"locked_reason":null},
+            "seven_day_opus":{"utilization":0.0,"resets_at":null},
+            "seven_day_sonnet":{"utilization":40,"resets_at":"2025-11-06T03:59:59+00:00"},
+            "model_scoped":[{"display_name":"Fable","utilization":84,"resets_at":"2025-11-06T03:59:59.320797+00:00"},
+            {"display_name":"sonnet","utilization":41,"resets_at":"2025-11-06T03:59:59+00:00"},
+            {"display_name":"","utilization":99,"resets_at":null}]}}
+            """)
+
+        let snapshot = try #require(try ClaudeUsageParser.parseResponseLine(line, fetchedAt: fetchedAt))
+
+        #expect(snapshot.shortWindow == nil)
+        #expect(snapshot.weeklyWindow?.remainingPercent == 25)
+        // `model_scoped` wins over the older field of the same model; an idle window stays listed.
+        #expect(snapshot.modelWindows.map(\.name) == ["Fable", "sonnet", "Opus"])
+        #expect(snapshot.modelWindows.map(\.window.usedPercent) == [84, 41, 0])
+        #expect(snapshot.modelWindows[0].window.durationMinutes == 10_080)
+        #expect(snapshot.modelWindows[2].window.state == .dormant)
+        let tightest = try #require(snapshot.tightestModelWindow)
+        #expect(tightest.name == "Fable")
+        #expect(tightest.label == "FABLE")
+        #expect(tightest.window.remainingPercent == 16)
+
+        let status = ProfileStatus(
+            profile: CodexProfile(
+                id: "claude", displayName: "claude", homeURL: URL(fileURLWithPath: "/nowhere"), provider: .claude
+            ),
+            snapshot: snapshot
+        )
+        #expect(LowestRemainingQuota.find(in: [status]) == LowestRemainingQuota(provider: .claude, percent: 16))
+    }
+
+    @Test("Shows no model ring when no model limit is in use")
+    func ignoresIdleModelWindows() throws {
+        let line = response("""
+            "response":{"rate_limits":{"seven_day":{"utilization":10,"resets_at":"2025-11-06T03:59:59+00:00"},
+            "seven_day_opus":{"utilization":0.0,"resets_at":null}}}
+            """)
+        let snapshot = try #require(try ClaudeUsageParser.parseResponseLine(line, fetchedAt: fetchedAt))
+        #expect(snapshot.modelWindows.count == 1)
+        #expect(snapshot.tightestModelWindow == nil)
+        #expect(ModelQuotaWindow(name: "A very long model name", window: snapshot.modelWindows[0].window).label == "A VERY ")
+    }
+
     @Test("Reports profiles without plan limits and errors from Claude Code")
     func rejectsUnavailableUsage() {
         let apiKeyProfile = response("""
