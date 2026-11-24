@@ -27,7 +27,7 @@ Codex accounts work alongside Claude accounts. This guide covers Claude only.
 ## 2. Install
 
 ```zsh
-git clone <this repository> CodexMeter
+git clone https://github.com/treidperkins/codex_status.git CodexMeter
 cd CodexMeter
 ./Scripts/install.sh
 ```
@@ -35,7 +35,7 @@ cd CodexMeter
 The script builds the app, installs it as `~/Applications/CodexMeter.app`,
 links `claude-who`, `claude-accounts` and `codex-who` into `~/.local/bin`, and
 opens the app. If it says `~/.local/bin` is not on your `PATH`, add the line it
-prints to `~/.zshrc`.
+prints to `~/.zshrc` and open a new terminal before the next step.
 
 To start CodexMeter when you log in, turn on **Open at login** in its
 settings menu (the gear at the bottom of the dashboard).
@@ -66,7 +66,7 @@ Claude Code 2.1.331 at /Users/you/.local/bin/claude
 
 ACCOUNT      OPEN WITH    SIGNED IN AS                    CHATS
 claude       claude       you@example.com (claude.ai)     42
-claude-work  claude-work  you@company.com (claude.ai)     7
+claude-work  claude-work  you@work.example.com (claude.ai)  7
 ```
 
 Restart CodexMeter after adding an account with `claude-accounts`: it finds
@@ -90,7 +90,8 @@ with one small request to the smallest model, at most once an hour.
 **Move a conversation to another account.** Below the accounts, **Recent
 chats** lists the eight newest conversations across accounts, as named in the
 Claude app; **See more** shows more, and archived ones are left out. Click
-**→ claude-work** on a row to copy that conversation. The original stays where
+**→ claude-work** on a row to copy that conversation; with three or more
+accounts, choose the destination from **Copy to…**. The original stays where
 it is. Then continue it from the same project folder:
 
 ```zsh
@@ -150,9 +151,9 @@ git pull
 |---|---|
 | "This Claude Code is too old to report usage" | Run `claude update`, then refresh with **⌘R**. |
 | "This profile has no Claude plan limits" | The account is signed out or uses an API key. Click **Reconnect** to sign in with a Claude subscription. |
-| "Usage is unavailable for now" | Anthropic's usage service is limiting reads for this account, often after many reads in a short time. The box keeps the last reading and the app tries again after 15 minutes; it usually clears within an hour. |
+| "Usage is unavailable for now" | Anthropic's usage service is limiting reads for this account, often after many reads in a short time. The box keeps the last reading and the app tries again after 15 minutes; it usually clears within an hour. **Reconnect** reads it at once. |
 | "Claude Code executable not found" | Install Claude Code in one of the locations in step 1. |
-| An account is missing | Check `claude-accounts`: the account must be signed in. Then restart CodexMeter. |
+| An account is missing | Open it once with its alias, which creates `~/.claude-<name>/.claude.json`, then restart CodexMeter, or add it with **+**. |
 | A copied conversation is not in `/resume` | Open the destination account from the conversation's project folder. The folder column in Recent chats shows which one. |
 | A copy fails with "incomplete JSONL record" | Claude Code was still writing to that conversation. Try again a moment later. |
 
@@ -165,6 +166,18 @@ lists from your claude.ai account, have no copy on the Mac. CodexMeter does
 not sign in to claude.ai, so it cannot list them, and a cloud session stays
 with the account that started it. The rings still count cloud usage, because
 cloud sessions share the plan's limits.
+
+## What the app changes
+
+- `~/.zshrc` (or `~/.bashrc`): one alias line for each account added with
+  **+** or `claude-accounts add`.
+- A new account's folder, `~/.claude-<name>`.
+- Copies of conversations, under the destination account's `projects/` folder,
+  with the original's modification time.
+- A renamed conversation: one title record at the end of its transcript and of
+  its identical copies, which also get the same new modification time.
+- A temporary `.command` file that opens Terminal to sign in.
+- Its own settings and account names, in its preferences.
 
 ## What the app reads
 

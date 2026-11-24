@@ -93,8 +93,9 @@ Anthropic's servers and the Claude app lists from your claude.ai account, have
 no copy on the Mac, so they are not listed and cannot be copied; a cloud
 session stays with the account that started it. CodexMeter does not sign in to
 claude.ai and never reads its login, so it cannot list them either. The quota
-rings still count cloud usage, because cloud sessions share the plan's limits. Click
-**→ account** on a row to copy that one conversation; with three or more
+rings still count cloud usage, because cloud sessions share the plan's limits.
+
+Click **→ account** on a row to copy that one conversation; with three or more
 accounts, choose the destination from **Copy to…**. A conversation that
 already has an identical copy on another account is listed once, with a ✓
 next to that account. After a copy, the command that resumes the
@@ -114,7 +115,7 @@ The gear at the bottom of the dashboard opens the settings:
 
 - **Start idle Claude windows**: the automatic activation above, on by
   default.
-- **Refresh every**: 1, 2 (the default), 5 or 10 minutes.
+- **Refresh every**: 1, 2 (the default), 5 or 10 minutes, from the next refresh.
 - **Notify when a limit is low**: off by default. macOS asks for permission
   the first time.
 - **Chats on a low Claude account**: off, suggest moving them (the default),
@@ -207,7 +208,7 @@ plain text. Terminal rows are bold and colored by profile.
 ### Build and configure the menu bar app
 
 The menu bar app requires macOS 14 or newer, Swift 6.2 or newer from Xcode 26 or its Command Line Tools,
-and an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
+and, for Codex accounts, an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
 require Claude Code 2.1.261 or newer (tested with 2.1.331) at
 `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`,
 or `~/.claude/local/claude`. An older version cannot report usage, and the
@@ -279,10 +280,11 @@ open dist/CodexMeter.app
   service answers 429, Claude Code stops asking for a while and answers with
   no limits. The app then keeps the last reading, says usage is unavailable,
   and does not read that profile again for 15 minutes.
-- **Claude automatic activation.** A window with no reset time is idle. The
-  app then runs `claude --print "Reply exactly OK." --model haiku` once and
-  reads the quota again. It waits an hour before it tries the same profile
-  again.
+- **Claude automatic activation.** A window is idle when it has no reset time
+  and no use, or when its reset time has passed. The five-hour window decides,
+  or the weekly one for a plan without a five-hour window. The app then runs
+  `claude --print "Reply exactly OK." --model haiku` once and reads the quota
+  again. It waits an hour before it tries the same profile again.
 - **Claude accounts.** Names given in the app are kept in its user defaults,
   by profile ID. The email comes from `claude auth status`, read until
   the profile is signed in. Reconnect clears the 15-minute pause and reads
