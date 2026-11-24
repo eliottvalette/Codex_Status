@@ -54,7 +54,9 @@ those limits, and the menu bar figure counts it.
   and can use a small amount of quota. For a Claude account, the request
   goes to the smallest model, at most once an hour, and the settings menu
   can turn it off.
-- **Accounts.** Each Claude account shows the email it is signed in as. When
+- **Accounts.** Each Claude account shows the email it is signed in as. The
+  pen next to its name gives it another name in the app; the folder and the
+  alias keep theirs, because Claude Code ties the sign-in to the folder. When
   an account has no current reading, because it is signed out or its usage
   cannot be read, **Reconnect** reads it again at once and, if it is still
   disconnected, opens Terminal in that account so you can sign in again. The **+** button at
@@ -83,8 +85,15 @@ With two or more Claude accounts, **Recent chats** below the accounts lists
 the eight newest Claude conversations across them, with the account, the time
 since your last message, the title, and the project folder; **See more**
 shows more. Conversations archived in the Claude desktop app are left out, and
-its titles are used. Cloud sessions are not listed: they have no copy on the
-Mac. Click
+its titles are used. Conversations started in a terminal are listed too.
+
+**Local conversations only.** Recent chats and every copy work on the
+conversations stored on this Mac. Cloud sessions, the ones Claude Code runs on
+Anthropic's servers and the Claude app lists from your claude.ai account, have
+no copy on the Mac, so they are not listed and cannot be copied; a cloud
+session stays with the account that started it. CodexMeter does not sign in to
+claude.ai and never reads its login, so it cannot list them either. The quota
+rings still count cloud usage, because cloud sessions share the plan's limits. Click
 **→ account** on a row to copy that one conversation; with three or more
 accounts, choose the destination from **Copy to…**. A conversation that
 already has an identical copy on another account is listed once, with a ✓
@@ -274,7 +283,8 @@ open dist/CodexMeter.app
   app then runs `claude --print "Reply exactly OK." --model haiku` once and
   reads the quota again. It waits an hour before it tries the same profile
   again.
-- **Claude accounts.** The email comes from `claude auth status`, read until
+- **Claude accounts.** Names given in the app are kept in its user defaults,
+  by profile ID. The email comes from `claude auth status`, read until
   the profile is signed in. Reconnect clears the 15-minute pause and reads
   the profile again. A new account's sign-in runs in Terminal from a
   `.command` file, which needs no automation permission.

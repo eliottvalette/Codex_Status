@@ -117,6 +117,12 @@ and then the destination account.
 type the new name and press Return. Claude Code's `/resume` shows the new
 name too; the Claude app keeps its own title.
 
+**Rename an account.** Click the pen next to an account's name, type a new
+name and press Return; an empty name brings back the original. The name is
+only a label in CodexMeter: the folder (`~/.claude-work`) and the alias
+(`claude-work`) keep their names, because Claude Code's sign-in is tied to the
+folder.
+
 **Reconnect an account.** When an account box shows an error instead of its
 limits, click **Reconnect** to read it again. If it is still disconnected,
 Terminal opens in it so you can sign in again with `/login`; click
@@ -150,6 +156,16 @@ git pull
 | A copied conversation is not in `/resume` | Open the destination account from the conversation's project folder. The folder column in Recent chats shows which one. |
 | A copy fails with "incomplete JSONL record" | Claude Code was still writing to that conversation. Try again a moment later. |
 
+## Local conversations only
+
+Recent chats, copying and moving work on the conversations stored on your
+Mac: the Claude app's local Code sessions and the ones started in a terminal.
+Cloud sessions, which run on Anthropic's servers and which the Claude app
+lists from your claude.ai account, have no copy on the Mac. CodexMeter does
+not sign in to claude.ai, so it cannot list them, and a cloud session stays
+with the account that started it. The rings still count cloud usage, because
+cloud sessions share the plan's limits.
+
 ## What the app reads
 
 - Quotas come from Claude Code itself: the app runs `claude` with a usage
@@ -157,4 +173,8 @@ git pull
   Keychain or any stored credential.
 - Recent chats and `claude-who` read conversation files under each account's
   `projects` folder, on your Mac only.
-- `claude-accounts` gets sign-in details from `claude auth status`.
+- `claude-accounts` and the account boxes get sign-in details from
+  `claude auth status`.
+- To hide archived conversations and show the same titles, the app reads three
+  fields (`cliSessionId`, `isArchived`, `title`) from the Claude app's session
+  files under `~/Library/Application Support/Claude/claude-code-sessions/`.
