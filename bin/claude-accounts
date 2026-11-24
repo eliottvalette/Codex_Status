@@ -21,8 +21,8 @@ from pathlib import Path
 
 MINIMUM_VERSION = (2, 1, 261)
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
-CANDIDATES = (".local/bin/claude", ".claude/local/claude")
-SYSTEM_CANDIDATES = ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")
+# Where CodexMeter looks for Claude Code, in its order. `claude` on PATH comes last.
+CANDIDATES = ("~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "~/.claude/local/claude")
 USAGE = """usage: claude-accounts [list]
        claude-accounts add NAME [--no-alias]
 
@@ -41,22 +41,26 @@ class Account:
 
 
 def accounts(home: Path) -> list[Account]:
+    """`~/.claude`, and each `~/.claude-*` folder that holds Claude Code data, as the app finds them."""
     found = [
         Account(directory.name.lstrip("."), directory)
         for directory in home.glob(".claude*")
-        if directory.is_dir() and (directory.name == ".claude" or directory.name.startswith(".claude-"))
+        if directory.is_dir() and (
+            directory.name == ".claude"
+            or directory.name.startswith(".claude-")
+            and ((directory / "projects").is_dir() or (directory / ".claude.json").is_file())
+        )
     ]
     return sorted(found, key=lambda account: (not account.is_default, account.alias))
 
 
 def find_claude(home: Path) -> Path | None:
+    for candidate in CANDIDATES:
+        path = home / candidate[2:] if candidate.startswith("~/") else Path(candidate)
+        if os.access(path, os.X_OK):
+            return path
     on_path = shutil.which("claude")
-    if on_path:
-        return Path(on_path)
-    for candidate in [home / path for path in CANDIDATES] + [Path(path) for path in SYSTEM_CANDIDATES]:
-        if os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return Path(on_path) if on_path else None
 
 
 def environment(account: Account) -> dict[str, str]:

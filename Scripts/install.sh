@@ -26,7 +26,10 @@ done
 # Quit a running copy so the new build replaces it.
 if pgrep -x CodexMeter >/dev/null; then
     pkill -x CodexMeter || true
-    sleep 1
+    for _ in {1..20}; do
+        pgrep -x CodexMeter >/dev/null || break
+        sleep 0.25
+    done
 fi
 mkdir -p "$applications"
 rm -rf "$installed_app"

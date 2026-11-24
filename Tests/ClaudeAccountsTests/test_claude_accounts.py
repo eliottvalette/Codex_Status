@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,7 +29,7 @@ esac
 def run(home: Path, *arguments: str, shell: str = "/bin/zsh") -> subprocess.CompletedProcess[str]:
     bin_directory = home / "bin"
     return subprocess.run(
-        [str(COMMAND), *arguments],
+        [sys.executable, str(COMMAND), *arguments],
         env={
             "HOME": str(home), "SHELL": shell, "PATH": f"{bin_directory}:/usr/bin:/bin",
             "ANTHROPIC_API_KEY": "sk-test", "CLAUDE_CONFIG_DIR": "/elsewhere",
@@ -55,6 +56,8 @@ class ClaudeAccountsTests(unittest.TestCase):
         (self.home / ".claude-work" / "projects" / "-Users-me-app" / "s1.jsonl").write_text("{}\n")
         (self.home / ".claude-work" / "projects" / "-Users-me-app" / "agent-a.jsonl").write_text("{}\n")
         (self.home / ".claude-notes.txt").write_text("not an account")
+        # Another tool's folder, with no Claude Code data in it.
+        (self.home / ".claude-mem").mkdir()
         (self.home / ".zshrc").write_text("alias claude-work='CLAUDE_CONFIG_DIR=\"$HOME/.claude-work\" claude'\n")
 
         completed = run(self.home)
