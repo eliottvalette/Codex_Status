@@ -38,6 +38,11 @@ final class AppSettings {
         didSet { defaults.set(chatMoves.rawValue, forKey: Key.chatMoves) }
     }
 
+    /// Names given to accounts in the app, by profile ID.
+    var accountNames: [String: String] {
+        didSet { defaults.set(accountNames, forKey: Key.accountNames) }
+    }
+
     @ObservationIgnored private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -47,6 +52,7 @@ final class AppSettings {
         refreshMinutes = Self.refreshChoices.contains(minutes) ? minutes : 2
         notifiesLowLimits = defaults.bool(forKey: Key.notifiesLowLimits)
         chatMoves = defaults.string(forKey: Key.chatMoves).flatMap(ChatMoves.init(rawValue:)) ?? .suggest
+        accountNames = defaults.dictionary(forKey: Key.accountNames) as? [String: String] ?? [:]
     }
 
     private enum Key {
@@ -54,5 +60,6 @@ final class AppSettings {
         static let refreshMinutes = "refreshMinutes"
         static let notifiesLowLimits = "notifiesLowLimits"
         static let chatMoves = "chatMoves"
+        static let accountNames = "accountNames"
     }
 }

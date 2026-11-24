@@ -25,6 +25,11 @@ struct CodexProfile: Identifiable, Hashable, Sendable {
         self.provider = provider
     }
 
+    /// The same profile under another name, as shown in the app.
+    func named(_ displayName: String) -> CodexProfile {
+        CodexProfile(id: id, displayName: displayName, homeURL: homeURL, provider: provider)
+    }
+
     /// The profiles the app tracks: the compiled Codex list, then every Claude Code profile
     /// found under the home directory. When Claude profiles exist and none of the Codex
     /// directories do, the Codex list is left out.
@@ -152,7 +157,7 @@ enum AccountSignIn: Equatable, Sendable {
 }
 
 struct ProfileStatus: Identifiable, Sendable {
-    let profile: CodexProfile
+    var profile: CodexProfile
     var snapshot: QuotaSnapshot?
     var signIn: AccountSignIn?
     var errorMessage: String?

@@ -52,6 +52,9 @@ struct DashboardView: View {
                     onReconnect: { profileID in
                         Task { await store.reconnect(profileID) }
                     },
+                    onRename: { profileID, name in
+                        store.renameAccount(profileID, to: name)
+                    },
                     onProfileRightClick: { profileID in
                         Task { await store.handleProfileTap(profileID) }
                     },
@@ -85,6 +88,7 @@ private struct ProfileRows: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
     let onReconnect: (String) -> Void
+    let onRename: (String, String) -> Void
     let onProfileRightClick: (String) -> Void
     let onProfileLeftClick: () -> Void
 
@@ -125,7 +129,8 @@ private struct ProfileRows: View {
             isMostRecent: status.id == mostRecentID,
             onRightClick: onProfileRightClick,
             onLeftClick: onProfileLeftClick,
-            onReconnect: onReconnect
+            onReconnect: onReconnect,
+            onRename: onRename
         )
         .frame(maxWidth: .infinity)
     }
@@ -383,6 +388,12 @@ private struct AliasQuadrant: View {
     let onLeftClick: () -> Void
     /// Claude accounts only: reads a disconnected account again.
     var onReconnect: ((String) -> Void)? = nil
+    /// Claude accounts only: names the account in the app.
+    var onRename: ((String, String) -> Void)? = nil
+
+    @ViewState private var isRenaming = false
+    @ViewState private var draftName = ""
+    @FocusState private var isEditingName: Bool
 
     private var isDisconnected: Bool {
         status.errorMessage != nil || status.signIn == .signedOut
@@ -405,26 +416,79 @@ private struct AliasQuadrant: View {
                 toolTip: status.errorMessage
             )
         }
-        // Above the click overlay, so the button gets its clicks.
-        .overlay(alignment: .topTrailing) {
-            if let onReconnect, isDisconnected, status.isRefreshing == false {
-                Button("Reconnect") { onReconnect(status.id) }
-                    .font(.system(size: 10))
-                    .buttonStyle(.borderless)
-                    .padding(.top, 9)
-                    .padding(.trailing, 12)
-                    .help("Read this account again. If it is still disconnected, opens Terminal in it to sign in again.")
+        // The click overlay takes every click under it, so the header's buttons sit above it.
+        .overlay(alignment: .top) {
+            if onRename != nil || onReconnect != nil {
+                headerControls
             }
         }
     }
 
+    /// The header's buttons, in a copy of the header whose labels are invisible, so the
+    /// pen lands right after the name. Invisible labels let clicks through to the overlay.
+    private var headerControls: some View {
+        HStack(spacing: 4) {
+            if isRenaming {
+                TextField("Name", text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .frame(maxWidth: 180)
+                    .focused($isEditingName)
+                    .background(TakesKeyboard())
+                    .onAppear { isEditingName = true }
+                    .onSubmit {
+                        isRenaming = false
+                        onRename?(status.id, draftName)
+                    }
+                    .onExitCommand { isRenaming = false }
+            } else {
+                nameLabel.hidden()
+                if onRename != nil {
+                    Button {
+                        draftName = status.profile.displayName
+                        isRenaming = true
+                    } label: {
+                        penIcon
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Rename this account in the app")
+                }
+            }
+
+            Spacer()
+
+            if let onReconnect, isDisconnected, status.isRefreshing == false {
+                Button("Reconnect") { onReconnect(status.id) }
+                    .font(.system(size: 10))
+                    .buttonStyle(.borderless)
+                    .help("Read this account again. If it is still disconnected, opens Terminal in it to sign in again.")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+    }
+
+    private var nameLabel: some View {
+        Text(status.headerTitle())
+            .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
+            .foregroundStyle(isMostRecent ? .primary : .secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+    }
+
+    private var penIcon: some View {
+        Image(systemName: "pencil")
+            .font(.system(size: 10))
+    }
+
     private var aliasHeader: some View {
         HStack(spacing: 4) {
-            Text(status.headerTitle())
-                .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
-                .foregroundStyle(isMostRecent ? .primary : .secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            nameLabel
+            if onRename != nil {
+                // Room for the pen, which is drawn in the layer above.
+                penIcon.hidden()
+            }
 
             if let email = status.signIn?.email {
                 Text(email)
@@ -451,6 +515,8 @@ private struct AliasQuadrant: View {
                     .controlSize(.mini)
             }
         }
+        // While renaming, the field above takes the place of these labels.
+        .opacity(isRenaming ? 0 : 1)
     }
 
     @ViewBuilder

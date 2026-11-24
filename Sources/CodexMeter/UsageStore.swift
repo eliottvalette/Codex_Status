@@ -44,7 +44,7 @@ final class UsageStore {
     ) {
         statuses = profiles.map {
             ProfileStatus(
-                profile: $0,
+                profile: settings.accountNames[$0.id].map($0.named) ?? $0,
                 snapshot: nil,
                 errorMessage: nil,
                 lastActivity: nil,
@@ -274,11 +274,21 @@ final class UsageStore {
             return
         }
         if statuses.contains(where: { $0.profile.homeURL.standardizedFileURL == profile.homeURL.standardizedFileURL }) == false {
-            statuses.append(ProfileStatus(profile: profile))
+            statuses.append(ProfileStatus(profile: settings.accountNames[profile.id].map(profile.named) ?? profile))
         }
         desktop.openSignIn(for: profile)
         await refresh()
         report("Sign in to \(profile.displayName) in Terminal, then press Reconnect", style: .progress)
+    }
+
+    /// Gives an account another name in the app. Its folder and alias keep theirs, because
+    /// Claude Code ties the sign-in to the folder. An empty name restores the original.
+    func renameAccount(_ profileID: String, to name: String) {
+        guard let index = statuses.firstIndex(where: { $0.id == profileID }) else { return }
+        let name = String(ClaudeChatCatalog.cleanTitle(name).prefix(40))
+        let isOriginal = name.isEmpty || name == profileID
+        settings.accountNames[profileID] = isOriginal ? nil : name
+        statuses[index].profile = statuses[index].profile.named(isOriginal ? profileID : name)
     }
 
     /// Reads a disconnected Claude account again at once. When it is still disconnected,

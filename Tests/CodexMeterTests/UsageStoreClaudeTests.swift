@@ -178,6 +178,33 @@ final class UsageStoreClaudeTests {
         #expect(store.showsRecentChats)
     }
 
+    @Test("Names an account in the app and keeps the name")
+    func renamesAccount() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let personal = try profile("claude-personal", in: home)
+        try writeChat(to: work)
+        let store = try makeStore([work, personal], home: home)
+        await store.refresh()
+
+        store.renameAccount(personal.id, to: "  Side\nproject ")
+
+        #expect(store.statuses[1].profile.displayName == "Side project")
+        #expect(store.statuses[1].profile.homeURL == personal.homeURL, "the folder keeps its name")
+        #expect(store.claudeProfiles.map(\.displayName) == ["claude-work", "Side project"])
+        #expect(settings.accountNames == [personal.id: "Side project"])
+        let reopened = try makeStore([work, personal], home: home)
+        #expect(reopened.statuses[1].profile.displayName == "Side project")
+
+        await store.copyChat(try #require(store.recentChats.first), to: personal.id)
+        #expect(store.transferFeedback?.message.contains("copied to Side project") == true)
+
+        store.renameAccount(personal.id, to: "")
+        #expect(store.statuses[1].profile.displayName == "claude-personal")
+        #expect(settings.accountNames.isEmpty)
+    }
+
     @Test("Starts no idle window when the setting is off")
     func respectsActivationSetting() async throws {
         let home = try temporaryDirectory()
