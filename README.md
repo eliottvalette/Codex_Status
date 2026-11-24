@@ -7,6 +7,9 @@ project.
 
 ## For humans
 
+Setting up several Claude accounts on a Mac? Follow
+[docs/setup.md](docs/setup.md) for the whole setup in five steps.
+
 ### Use multiple Codex accounts
 
 Each alias is a short command for a separate Codex account and its conversation
@@ -132,16 +135,24 @@ claude-personal auth status
 
 With `CLAUDE_CONFIG_DIR` unset, the regular `claude` command uses `~/.claude`.
 
-### Install `codex-who` and `claude-who`
+### Install `codex-who`, `claude-who` and `claude-accounts`
 
-From the repository root, install the commands and add their directory to your
-shell's `PATH`. The commands require Python 3.10 or newer.
+`./Scripts/install.sh` builds the app, installs it in `~/Applications`, and
+links the three commands into `~/.local/bin`. To link them by hand instead,
+run this from the repository root and add the directory to your shell's
+`PATH`. The commands require Python 3.10 or newer.
 
 ```zsh
 mkdir -p "$HOME/.local/bin"
 ln -s "$PWD/bin/codex-who" "$HOME/.local/bin/codex-who"
 ln -s "$PWD/bin/claude-who" "$HOME/.local/bin/claude-who"
+ln -s "$PWD/bin/claude-accounts" "$HOME/.local/bin/claude-accounts"
 ```
+
+`claude-accounts` lists each Claude Code account with its alias, who it is
+signed in as (from `claude auth status`), and its number of conversations.
+`claude-accounts add work` creates `~/.claude-work` and adds a `claude-work`
+alias to `~/.zshrc`.
 
 If needed, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` and run
 `source ~/.zshrc`.
@@ -248,4 +259,5 @@ Run the checks from the repository root:
 swift test
 python3 -B -m unittest discover -s Tests/CodexWhoTests
 python3 -B -m unittest discover -s Tests/ClaudeWhoTests
+python3 -B -m unittest discover -s Tests/ClaudeAccountsTests
 ```
