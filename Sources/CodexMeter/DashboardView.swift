@@ -136,6 +136,10 @@ private struct RecentChatsSection: View {
                 .foregroundStyle(.secondary)
                 .tracking(1)
 
+            if let move = store.chatMove {
+                suggestion(move)
+            }
+
             if store.recentChats.isEmpty {
                 Text("No Claude conversations yet")
                     .font(.system(size: 11))
@@ -180,9 +184,36 @@ private struct RecentChatsSection: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: 110, alignment: .leading)
 
-            copyControl(chat)
+            HStack(spacing: 8) {
+                Button {
+                    store.copyResumeCommand(for: chat)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Copy the command that resumes this conversation")
+
+                copyControl(chat)
+            }
         }
         .help(tooltip(chat))
+    }
+
+    private func suggestion(_ move: ChatMove) -> some View {
+        let label = move.chats.count == 1 ? "chat" : "chats"
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("\(move.source.displayName) has \(move.sourceRoom)% left. Move \(move.chats.count) \(label) to \(move.destination.displayName)?")
+                .lineLimit(1)
+            Button("Move") {
+                Task { await store.moveChats(move) }
+            }
+            .buttonStyle(.borderless)
+            .disabled(store.isTransferring)
+        }
+        .font(.system(size: 11))
     }
 
     @ViewBuilder
@@ -589,6 +620,48 @@ private struct QuotaGauge: View {
 
 // MARK: - Control row
 
+private struct SettingsMenu: View {
+    @Bindable var settings: AppSettings
+    let store: UsageStore
+
+    init(store: UsageStore) {
+        self.store = store
+        settings = store.settings
+    }
+
+    var body: some View {
+        Menu {
+            Toggle("Start idle Claude windows", isOn: $settings.startsIdleClaudeWindows)
+            Picker("Refresh every", selection: $settings.refreshMinutes) {
+                ForEach(AppSettings.refreshChoices, id: \.self) { minutes in
+                    Text("\(minutes) min").tag(minutes)
+                }
+            }
+            Toggle("Notify when a limit is low", isOn: $settings.notifiesLowLimits)
+            Picker("Chats on a low Claude account", selection: $settings.chatMoves) {
+                ForEach(AppSettings.ChatMoves.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            Divider()
+            Toggle("Open at login", isOn: Binding(
+                get: { LoginItem.isEnabled },
+                set: { enabled in
+                    if let message = LoginItem.setEnabled(enabled) {
+                        store.report(message, style: .failure)
+                    }
+                }
+            ))
+        } label: {
+            Image(systemName: "gearshape")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Settings")
+    }
+}
+
 private struct ControlRow: View {
     let store: UsageStore
 
@@ -635,6 +708,8 @@ private struct ControlRow: View {
                 .accessibilityLabel("Sync Codex conversations from the last 10 days")
                 .help("Sync Codex conversations from the last 10 days")
             }
+
+            SettingsMenu(store: store)
 
             Button {
                 Task { await store.refresh() }

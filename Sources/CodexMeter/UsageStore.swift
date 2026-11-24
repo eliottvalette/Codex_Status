@@ -17,12 +17,19 @@ final class UsageStore {
     private var feedbackClearTask: Task<Void, Never>?
 
     private var lastClaudeActivationAttempts: [String: Date] = [:]
+    /// Claude accounts whose usage is not read again before this time.
+    private var claudeUsagePausedUntil: [String: Date] = [:]
+    /// Accounts that were low at the last refresh, so each one is announced once.
+    private var lowAccountIDs: Set<String> = []
+
+    let settings: AppSettings
+    private let notifier: any LowLimitNotifier
+    private let writeToClipboard: @MainActor (String) -> Void
 
     private let clients: ProviderClients
     private let transferService: SessionTransferService
     private let claudeTransferService: ClaudeSessionTransferService
     private let chatCatalog: ClaudeChatCatalog
-    private let refreshInterval: Duration
 
     init(
         profiles: [CodexProfile] = CodexProfile.launchProfiles(),
@@ -31,7 +38,9 @@ final class UsageStore {
         transferService: SessionTransferService = SessionTransferService(),
         claudeTransferService: ClaudeSessionTransferService = ClaudeSessionTransferService(),
         chatCatalog: ClaudeChatCatalog = ClaudeChatCatalog(),
-        refreshInterval: Duration = .seconds(120)
+        settings: AppSettings = AppSettings(),
+        notifier: any LowLimitNotifier = SystemNotifier(),
+        writeToClipboard: @escaping @MainActor (String) -> Void = UsageStore.writeToPasteboard
     ) {
         statuses = profiles.map {
             ProfileStatus(
@@ -47,7 +56,14 @@ final class UsageStore {
         self.transferService = transferService
         self.claudeTransferService = claudeTransferService
         self.chatCatalog = chatCatalog
-        self.refreshInterval = refreshInterval
+        self.settings = settings
+        self.notifier = notifier
+        self.writeToClipboard = writeToClipboard
+    }
+
+    static func writeToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     func paceValue(relativeTo now: Date) -> PaceValue? {
@@ -212,6 +228,49 @@ final class UsageStore {
             return
         }
 
+        guard let copiedCount = await copyChats([chat], from: source, to: destination) else { return }
+        // The next step is to open it there, so the command that does it is ready to paste.
+        writeToClipboard(chat.resumeCommand(in: destination))
+        let title = chat.title.count > 32 ? chat.title.prefix(31) + "…" : chat.title
+        let outcome = copiedCount == 0 ? "already on" : "copied to"
+        report("✓ “\(title)” \(outcome) \(destination.displayName) · resume command copied", style: .success)
+    }
+
+    /// Copies the chats of a low account to the account with the most room.
+    func moveChats(_ move: ChatMove) async {
+        guard await copyChats(move.chats, from: move.source, to: move.destination) != nil else { return }
+        let label = move.chats.count == 1 ? "chat" : "chats"
+        report(
+            "✓ \(move.chats.count) \(label) from \(move.source.displayName) copied to \(move.destination.displayName)",
+            style: .success
+        )
+    }
+
+    /// The move to suggest, or to make on its own, under the chat setting.
+    var chatMove: ChatMove? {
+        guard settings.chatMoves != .off else { return nil }
+        return LowLimits.chatMove(statuses: statuses, chats: recentChats)
+    }
+
+    func copyResumeCommand(for chat: RecentClaudeChat) {
+        guard let profile = claudeProfiles.first(where: { $0.id == chat.profileID }) else { return }
+        writeToClipboard(chat.resumeCommand(in: profile))
+        report("Resume command for \(profile.displayName) copied", style: .success)
+    }
+
+    func report(_ message: String, style: TransferFeedback.Style) {
+        transferFeedback = TransferFeedback(style: style, message: message)
+        if style == .success { scheduleFeedbackClear() }
+    }
+
+    /// Copies the chats one by one and reloads the list. Returns how many were written, or
+    /// `nil` when another copy is running or this one failed, which the status line shows.
+    private func copyChats(
+        _ chats: [RecentClaudeChat],
+        from source: CodexProfile,
+        to destination: CodexProfile
+    ) async -> Int? {
+        guard isTransferring == false else { return nil }
         feedbackClearTask?.cancel()
         transferSourceID = nil
         transferDestinationID = destination.id
@@ -219,22 +278,20 @@ final class UsageStore {
             style: .progress,
             message: "Copying to \(destination.displayName)…"
         )
-
+        var copiedCount: Int? = 0
         do {
-            let result = try await claudeTransferService.transferSession(
-                chat.file, from: source, to: destination
-            )
-            let title = chat.title.count > 32 ? chat.title.prefix(31) + "…" : chat.title
-            let message = result.copiedCount == 0
-                ? "✓ “\(title)” already on \(destination.displayName)"
-                : "✓ “\(title)” copied to \(destination.displayName)"
-            transferFeedback = TransferFeedback(style: .success, message: message)
-            scheduleFeedbackClear()
+            for chat in chats {
+                copiedCount? += try await claudeTransferService.transferSession(
+                    chat.file, from: source, to: destination
+                ).copiedCount
+            }
         } catch {
-            transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
+            copiedCount = nil
+            report(error.localizedDescription, style: .failure)
         }
         transferDestinationID = nil
         await reloadRecentChats()
+        return copiedCount
     }
 
     private func scheduleFeedbackClear() {
@@ -287,7 +344,7 @@ final class UsageStore {
 
         while Task.isCancelled == false {
             do {
-                try await Task.sleep(for: refreshInterval)
+                try await Task.sleep(for: .seconds(settings.refreshMinutes * 60))
             } catch {
                 return
             }
@@ -304,6 +361,7 @@ final class UsageStore {
 
         let profiles = statuses.map(\.profile)
         let clients = self.clients
+        let pausedIDs = Set(claudeUsagePausedUntil.filter { $0.value > .now }.keys)
 
         await withTaskGroup(of: FetchResult.self) { group in
             for profile in profiles {
@@ -315,11 +373,20 @@ final class UsageStore {
                         activityOutcome = .failure(error.localizedDescription)
                     }
 
+                    guard pausedIDs.contains(profile.id) == false else {
+                        return FetchResult(profileID: profile.id, quotaOutcome: .paused, activityOutcome: activityOutcome)
+                    }
                     do {
                         let snapshot = try await clients.fetchRateLimits(for: profile)
                         return FetchResult(
                             profileID: profile.id,
                             quotaOutcome: .success(snapshot),
+                            activityOutcome: activityOutcome
+                        )
+                    } catch ClaudeUsageError.usageTemporarilyUnavailable {
+                        return FetchResult(
+                            profileID: profile.id,
+                            quotaOutcome: .unavailable(ClaudeUsageError.usageTemporarilyUnavailable.localizedDescription),
                             activityOutcome: activityOutcome
                         )
                     } catch {
@@ -347,8 +414,14 @@ final class UsageStore {
                     )
                     statuses[index].snapshot = updatedSnapshot
                     statuses[index].errorMessage = nil
+                    claudeUsagePausedUntil[result.profileID] = nil
                 case let .failure(message):
                     statuses[index].errorMessage = message
+                case let .unavailable(message):
+                    statuses[index].errorMessage = message
+                    claudeUsagePausedUntil[result.profileID] = .now.addingTimeInterval(ClaudeUsagePolicy.retryDelay)
+                case .paused:
+                    break
                 }
 
                 switch result.activityOutcome {
@@ -363,7 +436,25 @@ final class UsageStore {
 
         await reloadRecentChats()
         isRefreshing = false
+        await handleLowLimits()
         await handlePostRefresh()
+    }
+
+    /// Announces each account that has just become low, and moves its chats when the
+    /// setting asks for it.
+    private func handleLowLimits() async {
+        let low = LowLimits.lowIDs(in: statuses)
+        if settings.notifiesLowLimits {
+            for status in statuses where low.contains(status.id) && lowAccountIDs.contains(status.id) == false {
+                if let alert = LowLimits.alert(for: status, in: statuses) {
+                    notifier.notify(title: alert.title, body: alert.body)
+                }
+            }
+        }
+        lowAccountIDs = low
+        if settings.chatMoves == .automatic, let chatMove {
+            await moveChats(chatMove)
+        }
     }
 
     func performActivationCycle() async {
@@ -380,7 +471,8 @@ final class UsageStore {
             guard let snapshot = status.snapshot else { return false }
             if status.profile.provider == .claude {
                 return ClaudeActivationPolicy.shouldActivate(
-                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id]
+                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id],
+                    isEnabled: settings.startsIdleClaudeWindows
                 )
             }
             let shortCandidate = snapshot.shortWindow.map { $0.usedPercent == 0 && $0.state != .active } ?? false
@@ -421,7 +513,8 @@ final class UsageStore {
             if status.profile.provider == .claude {
                 // Claude reports an idle window directly, so no second reading is needed.
                 if ClaudeActivationPolicy.shouldActivate(
-                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id]
+                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id],
+                    isEnabled: settings.startsIdleClaudeWindows
                 ) {
                     dormantProfiles.append(status.profile)
                 }
@@ -662,6 +755,10 @@ private struct FetchResult: Sendable {
 private enum FetchOutcome: Sendable {
     case success(QuotaSnapshot)
     case failure(String)
+    /// Claude Code answered without limits; reads pause for a while.
+    case unavailable(String)
+    /// Not read this time because reads are paused.
+    case paused
 }
 
 private enum ActivityOutcome: Sendable {

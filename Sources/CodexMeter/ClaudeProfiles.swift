@@ -3,9 +3,6 @@ import Foundation
 /// Claude Code keeps one account per configuration directory. `~/.claude` is the default;
 /// any other directory is selected with `CLAUDE_CONFIG_DIR`.
 enum ClaudeProfiles {
-    /// Set to `false` to stop the app from starting idle Claude windows.
-    static let automaticActivation = true
-
     static let defaultDirectoryName = ".claude"
     private static let maximumProjectNameLength = 200
 

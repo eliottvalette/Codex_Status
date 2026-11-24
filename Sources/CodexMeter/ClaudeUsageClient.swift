@@ -19,7 +19,7 @@ enum ClaudeUsageError: Error, Equatable, LocalizedError {
         case .planLimitsUnavailable:
             "This profile has no Claude plan limits. Sign in with a Claude subscription using /login."
         case .usageTemporarilyUnavailable:
-            "Usage is unavailable for now, usually because the usage service is limiting reads. The app tries again at the next refresh."
+            "Usage is unavailable for now, usually because the usage service is limiting reads. The app tries again in 15 minutes."
         case let .activationFailed(message):
             "Claude Code could not start the usage window: \(message)"
         }
@@ -199,6 +199,12 @@ enum ClaudeUsageParser {
     }
 }
 
+enum ClaudeUsagePolicy {
+    /// After an answer without limits, the account's usage is not read again for this long,
+    /// so the app does not keep asking a service that is limiting reads.
+    static let retryDelay: TimeInterval = 900
+}
+
 enum ClaudeActivationPolicy {
     /// One attempt an hour at most, so a window that stays idle cannot drain quota.
     static let cooldown: TimeInterval = 3_600
@@ -216,7 +222,7 @@ enum ClaudeActivationPolicy {
         _ snapshot: QuotaSnapshot,
         lastAttempt: Date?,
         now: Date = .now,
-        isEnabled: Bool = ClaudeProfiles.automaticActivation
+        isEnabled: Bool
     ) -> Bool {
         guard isEnabled, hasIdleWindow(snapshot) else { return false }
         guard let lastAttempt else { return true }

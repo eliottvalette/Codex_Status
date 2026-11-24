@@ -146,6 +146,28 @@ struct ClaudeRecentChatsTests {
         }
     }
 
+    @Test("Builds a command that resumes the conversation in a given account")
+    func buildsResumeCommand() {
+        let home = URL(fileURLWithPath: "/Users/me")
+        func account(_ path: String) -> CodexProfile {
+            CodexProfile(id: "a", displayName: "a", homeURL: URL(fileURLWithPath: path), provider: .claude)
+        }
+        func chat(cwd: String?) -> RecentClaudeChat {
+            RecentClaudeChat(
+                profileID: "a",
+                file: .init(sessionID: "s1", projectDirectoryName: project, url: URL(fileURLWithPath: "/x/s1.jsonl"), modifiedAt: .now),
+                title: "t", workingDirectory: cwd, folderName: "app", lastMessageAt: .now, copiedToProfileIDs: []
+            )
+        }
+
+        #expect(chat(cwd: "/Users/me/app").resumeCommand(in: account("/Users/me/.claude"), home: home)
+            == "cd '/Users/me/app' && claude --resume s1")
+        #expect(chat(cwd: "/Users/me/it's here").resumeCommand(in: account("/Users/me/.claude-work"), home: home)
+            == #"cd '/Users/me/it'\''s here' && CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude --resume s1"#)
+        #expect(chat(cwd: nil).resumeCommand(in: account("/Volumes/x/.claude-y"), home: home)
+            == "CLAUDE_CONFIG_DIR='/Volumes/x/.claude-y' claude --resume s1")
+    }
+
     @Test("Formats ages the way claude-who does")
     func formatsAges() {
         let now = Date(timeIntervalSince1970: 1_795_000_000)

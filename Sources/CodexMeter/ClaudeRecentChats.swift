@@ -29,6 +29,27 @@ struct RecentClaudeChat: Identifiable, Equatable, Sendable {
         if elapsed < 86_400 { return "\(elapsed / 3_600)h" }
         return "\(elapsed / 86_400)d \((elapsed % 86_400) / 3_600)h"
     }
+
+    /// A shell command that opens this conversation in `profile`, from its project folder
+    /// so that `/resume` finds it.
+    func resumeCommand(
+        in profile: CodexProfile,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String {
+        var command = "claude --resume \(file.sessionID)"
+        if ClaudeProfiles.usesDefaultDirectory(profile, home: home) == false {
+            let directory = profile.homeURL.standardizedFileURL
+            let inHome = directory.deletingLastPathComponent().path == home.standardizedFileURL.path
+            let path = inHome ? "\"$HOME/\(directory.lastPathComponent)\"" : Self.shellQuoted(directory.path)
+            command = "CLAUDE_CONFIG_DIR=\(path) " + command
+        }
+        guard let workingDirectory else { return command }
+        return "cd \(Self.shellQuoted(workingDirectory)) && " + command
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 }
 
 /// Lists the most recent Claude conversations across accounts.
