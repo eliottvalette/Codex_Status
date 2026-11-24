@@ -37,8 +37,8 @@ links `claude-who`, `claude-accounts` and `codex-who` into `~/.local/bin`, and
 opens the app. If it says `~/.local/bin` is not on your `PATH`, add the line it
 prints to `~/.zshrc`.
 
-To start CodexMeter when you log in, add it in **System Settings > General >
-Login Items**.
+To start CodexMeter when you log in, turn on **Open at login** in its
+settings menu (the gear at the bottom of the dashboard).
 
 ## 3. Add your Claude accounts
 
@@ -94,14 +94,28 @@ cd path/to/the/project
 claude-work --resume
 ```
 
-The first time an account opens a project, Claude Code asks whether you trust
-the folder. A ✓ next to an account means it already has an identical copy.
+After the copy, the exact command is already on your clipboard: paste it in
+a terminal to open the conversation in the other account. The copy button on
+each row gives the command for the row's account. The first time an account
+opens a project, Claude Code asks whether you trust the folder. A ✓ next to an
+account means it already has an identical copy.
+
+**When an account runs low.** An account is low when any of its limits has 10%
+or less left. Recent chats then suggests moving that account's chats to the
+account with the most room; click **Move**. In the settings menu you can turn
+this off or let the app move them on its own, and turn on a notification when
+an account becomes low.
 
 To copy the three newest conversations at once, right-click the source account
 and then the destination account.
 
 **Find a conversation.** In a project folder, run `claude-who` to see the ten
 latest conversations there, across accounts, with the account to open.
+
+**Settings.** The gear at the bottom of the dashboard sets whether the app
+starts idle windows, how often it refreshes (every 2 minutes by default), the
+low-limit notification, what happens to chats on a low account, and whether
+the app opens at login.
 
 ## 5. Update
 
@@ -117,7 +131,7 @@ git pull
 |---|---|
 | "This Claude Code is too old to report usage" | Run `claude update`, then refresh with **⌘R**. |
 | "This profile has no Claude plan limits" | The account is signed out or uses an API key. Open it and sign in with `/login` using a Claude subscription. |
-| "Usage is unavailable for now" | Anthropic's usage service is limiting reads for this account, often after many reads in a short time. The box keeps the last reading and the app tries again; it usually clears within an hour. |
+| "Usage is unavailable for now" | Anthropic's usage service is limiting reads for this account, often after many reads in a short time. The box keeps the last reading and the app tries again after 15 minutes; it usually clears within an hour. |
 | "Claude Code executable not found" | Install Claude Code in one of the locations in step 1. |
 | An account is missing | Check `claude-accounts`: the account must be signed in. Then restart CodexMeter. |
 | A copied conversation is not in `/resume` | Open the destination account from the conversation's project folder. The folder column in Recent chats shows which one. |

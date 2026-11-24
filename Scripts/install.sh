@@ -49,7 +49,7 @@ if [[ ":$PATH:" != *":$bin_directory:"* ]]; then
     print "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-print "\nTo start CodexMeter when you log in, add it in System Settings > General > Login Items."
+print "\nTo start CodexMeter when you log in, turn on Open at login in its settings menu."
 if $open_app; then
     open "$installed_app"
 fi

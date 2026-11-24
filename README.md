@@ -45,14 +45,18 @@ quota. When a plan also limits a single model each week, such as
 those limits, and the menu bar figure counts it.
 
 - **Automatic refresh.** Quotas update when the app opens, when the Mac wakes
-  from sleep, and about every two minutes while the app runs. Use the refresh
-  button or press **⌘R** to update on demand. A warning marks old quota data
-  if a refresh fails.
+  from sleep, and every two minutes while the app runs (see
+  [Settings](#settings)). Use the refresh button or press **⌘R** to update on
+  demand. A warning marks old quota data if a refresh fails.
 - **Automatic activation.** When a refresh detects an idle quota window,
   the app can send a short background request to start the window and
   check for a reset time. The request runs in a temporary conversation
   and can use a small amount of quota. For a Claude account, the request
-  goes to the smallest model, at most once an hour.
+  goes to the smallest model, at most once an hour, and the settings menu
+  can turn it off.
+- **Low limits.** An account is low when any of its limits has 10% or less
+  left. The app can notify you once when an account becomes low, naming the
+  account of the same provider with the most room left.
 
 ### Continue a conversation on another account
 
@@ -75,7 +79,28 @@ since your last message, the title, and the project folder. Click
 **→ account** on a row to copy that one conversation; with three or more
 accounts, choose the destination from **Copy to…**. A conversation that
 already has an identical copy on another account is listed once, with a ✓
-next to that account.
+next to that account. After a copy, the command that resumes the
+conversation in the destination is on the clipboard, ready to paste in a
+terminal. The copy button on each row puts the command for the row's account
+there.
+
+When a Claude account is low, Recent chats suggests moving its chats to the
+Claude account with the most room, with a **Move** button. The settings menu
+can turn the suggestion off, or have the app move them on its own after each
+refresh. Moving copies: the originals stay where they are.
+
+### Settings
+
+The gear at the bottom of the dashboard opens the settings:
+
+- **Start idle Claude windows**: the automatic activation above, on by
+  default.
+- **Refresh every**: 1, 2 (the default), 5 or 10 minutes.
+- **Notify when a limit is low**: off by default. macOS asks for permission
+  the first time.
+- **Chats on a low Claude account**: off, suggest moving them (the default),
+  or move them automatically.
+- **Open at login**: adds the app to the login items.
 
 ### Sync recent conversations across accounts
 
@@ -178,9 +203,8 @@ to match the shell aliases. The dashboard displays up to four profiles in the or
 Claude profiles need no source changes. At launch the app adds `~/.claude` and
 every `~/.claude-*` directory that contains `projects` or `.claude.json`. When
 it finds Claude profiles and none of the Codex directories exist, it leaves
-the Codex accounts out. To stop the app from starting idle Claude windows, set
-`automaticActivation` to `false` in
-[ClaudeProfiles.swift](Sources/CodexMeter/ClaudeProfiles.swift).
+the Codex accounts out. Behaviour you may want to change, such as starting
+idle Claude windows, is in the [settings menu](#settings).
 
 From the repository root, build and open the app:
 
@@ -232,11 +256,20 @@ open dist/CodexMeter.app
   ties its sign-in to that variable. Claude Code marks `get_usage` as
   experimental, so a later version may change the response. The request
   and its `skip_behaviors` option first appear together in 2.1.261; 2.1.112
-  answers `Unsupported control request subtype`.
+  answers `Unsupported control request subtype`. When Anthropic's usage
+  service answers 429, Claude Code stops asking for a while and answers with
+  no limits. The app then keeps the last reading, says usage is unavailable,
+  and does not read that profile again for 15 minutes.
 - **Claude automatic activation.** A window with no reset time is idle. The
   app then runs `claude --print "Reply exactly OK." --model haiku` once and
   reads the quota again. It waits an hour before it tries the same profile
   again.
+- **Low limits and chat moves.** After each refresh, a profile whose lowest
+  window, per-model limits included, is at 10% or less is low. Each profile
+  that has just become low is announced once. A chat move takes the lowest
+  Claude profile that has chats in Recent chats, and copies those chats that
+  the Claude profile with the most room does not already hold identically.
+  Settings live in the app's user defaults.
 - **Claude recent chats.** The list reads the transcripts of every Claude
   profile, newest first, and sorts them by the last message the user typed, as
   `claude-who` does. The title is the custom title, then the AI title, then the
