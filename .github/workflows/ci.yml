@@ -19,6 +19,7 @@ jobs:
         run: |
           python3 -B -m unittest discover -s Tests/CodexWhoTests
           python3 -B -m unittest discover -s Tests/ClaudeWhoTests
+          python3 -B -m unittest discover -s Tests/ClaudeAccountsTests
 
   app:
     runs-on: macos-latest
