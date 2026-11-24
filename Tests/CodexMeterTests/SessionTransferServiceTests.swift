@@ -73,39 +73,40 @@ struct SessionTransferServiceTests {
     func copiesMissingConversationsFromMixedBatch() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let destinationRoot = directory.appending(path: "destination")
-        let existingURL = destinationRoot.appending(path: "sessions/existing.jsonl")
-        let missingURL = destinationRoot.appending(path: "sessions/missing.jsonl")
-        try FileManager.default.createDirectory(
-            at: existingURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let existingData = rolloutData(threadID: "existing", marker: "destination")
-        try existingData.write(to: existingURL)
-
-        let prepared = [
-            SessionTransferService.PreparedTransfer(
-                session: .init(id: "existing", rolloutPath: "/source/existing.jsonl", name: nil),
-                sourceData: rolloutData(threadID: "existing", marker: "source"),
-                destinationURL: existingURL,
-                disposition: try SessionTransferService.destinationDisposition(
-                    sourceData: rolloutData(threadID: "existing", marker: "source"),
-                    destinationData: existingData, threadID: "existing"
-                ),
-                sourceThreadID: nil
-            ),
-            SessionTransferService.PreparedTransfer(
-                session: .init(id: "missing", rolloutPath: "/source/missing.jsonl", name: nil),
-                sourceData: rolloutData(threadID: "missing"),
-                destinationURL: missingURL,
-                disposition: .copy,
-                sourceThreadID: nil
-            ),
+        let source = CodexProfile(id: "source", displayName: "Source", homeURL: directory.appending(path: "source"))
+        let destination = CodexProfile(id: "destination", displayName: "Destination", homeURL: directory.appending(path: "destination"))
+        let existing = source.homeURL.appending(path: "sessions/existing.jsonl")
+        let missing = source.homeURL.appending(path: "sessions/missing.jsonl")
+        let existingDestination = destination.homeURL.appending(path: "sessions/existing.jsonl")
+        let missingDestination = destination.homeURL.appending(path: "sessions/missing.jsonl")
+        for url in [existing, existingDestination] {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        let destinationData = rolloutData(threadID: "existing", marker: "destination")
+        try destinationData.write(to: existingDestination)
+        try rolloutData(threadID: "existing", marker: "source").write(to: existing)
+        try rolloutData(threadID: "missing").write(to: missing)
+        let sessions = [
+            SessionTransferService.SessionRecord(id: "existing", rolloutPath: existing.path, name: nil),
+            SessionTransferService.SessionRecord(id: "missing", rolloutPath: missing.path, name: nil),
         ]
-
+        var issues: [String] = []
+        let prepared = try SessionTransferService.prepareTransferClosure(
+            selected: sessions,
+            available: sessions,
+            from: source,
+            to: destination,
+            validate: { item in
+                if item.destinationData != nil {
+                    throw SessionTransferError.divergentHistory(item.session.id)
+                }
+            },
+            onSkippedSession: { issues.append($0) }
+        )
+        #expect(issues.count == 1)
         #expect(try SessionTransferService.commit(prepared) == 1)
-        #expect(try Data(contentsOf: existingURL) == existingData)
-        #expect(try Data(contentsOf: missingURL) == rolloutData(threadID: "missing"))
+        #expect(try Data(contentsOf: existingDestination) == destinationData)
+        #expect(try Data(contentsOf: missingDestination) == rolloutData(threadID: "missing"))
     }
 
     @Test("Round-trip transfer replaces the original and indexes the continued conversation")
@@ -132,6 +133,47 @@ struct SessionTransferServiceTests {
         #expect(try SessionTransferService.commit(incoming) == 1)
         #expect(try Data(contentsOf: originalURL) == continued)
         #expect(try SessionTransferService.commit(SessionTransferService.prepareTransferClosure(selected: [first], available: [first], from: a, to: b)) == 0)
+    }
+
+    @Test("Treats equal-length local settings as equivalent without ignoring changed messages")
+    func comparesLocalSettingsWithoutChangingHistoryOffsets() {
+        let history = rolloutData(threadID: "thread-1")
+        let first = Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"setting\":\"one\"}}\n".utf8)
+        let second = Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"setting\":\"two\"}}\n".utf8)
+        #expect(SessionTransferService.sameHistoryWithLocalSettings(history + first, history + second))
+        #expect(!SessionTransferService.sameHistoryWithLocalSettings(history + first, history + second + Data(" ".utf8)))
+        #expect(!SessionTransferService.sameHistoryWithLocalSettings(
+            rolloutData(threadID: "thread-1", marker: "first") + first,
+            rolloutData(threadID: "thread-1", marker: "other") + second
+        ))
+    }
+
+    @Test("Persists successful comparisons and invalidates changed parents and index rows")
+    func invalidatesPersistedComparison() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profile = CodexProfile(id: "destination", displayName: "Destination", homeURL: directory)
+        let parent = directory.appending(path: "parent.jsonl")
+        try Data("original".utf8).write(to: parent)
+        let stamp = try #require(SyncComparisonCache.FileStamp.read(parent.path))
+        let indexed = SyncComparisonCache.IndexedRollout(path: "/destination", updated: 42, recency: 42)
+        let entry = SyncComparisonCache.Entry(
+            sourcePath: "/source", destination: indexed, files: [parent.path: stamp],
+            indexedParents: ["parent": parent.path], historySegments: ["segment": parent.path]
+        )
+        let cache = SyncComparisonCache(sources: ["profile": ["thread": entry]])
+        try cache.save(in: profile)
+        let recovered = try #require(SyncComparisonCache.read(in: profile).sources["profile"]?["thread"])
+
+        let parents = ["parent": parent.path]
+        let segments = ["segment": [parent.path]]
+        #expect(recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents, historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: nil, indexedParents: parents, historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: [:], historySegments: segments))
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents,
+                                  historySegments: ["segment": [parent.path, "/duplicate"]]))
+        try Data("modified".utf8).write(to: parent)
+        #expect(!recovered.matches(sourcePath: "/source", destination: indexed, indexedParents: parents, historySegments: segments))
     }
 
     @Test("Divergent conversations follow user request recency rather than file size", arguments: [true, false])
@@ -355,6 +397,31 @@ struct SessionTransferServiceTests {
         let sessions = try SessionTransferService.recentSessions(for: profile, limit: 3)
         #expect(sessions.map(\.id) == ["one", "two", "three"])
         #expect(sessions.first?.name == "One")
+        let now = Date(timeIntervalSince1970: 10 * 86_400 + 0.03)
+        let syncSessions = try SessionTransferService.sessionsInSyncWindow(for: profile, now: now)
+        #expect(syncSessions.map(\.id) == ["one", "two", "three"])
+
+        let continued = directory.appending(path: "one.jsonl")
+        let unchanged = directory.appending(path: "two.jsonl")
+        try Data("""
+            {"timestamp":"1970-01-01T00:00:00.050Z","type":"event_msg","payload":{"type":"user_message"}}
+
+            """.utf8).write(to: continued)
+        try rolloutData(threadID: "two").write(to: unchanged)
+        try runSQLite(database: database, sql: """
+            UPDATE threads SET rollout_path = '\(continued.path)' WHERE id = 'one';
+            UPDATE threads SET rollout_path = '\(unchanged.path)', recency_at_ms = 60 WHERE id = 'two';
+            """)
+        try """
+            [{"sourceID":"original","forkID":"two","activityMilliseconds":40},
+             {"sourceID":"other","forkID":"one","activityMilliseconds":45}]
+            """.write(
+                to: directory.appending(path: "codex-meter-picker-imports.json"),
+                atomically: true,
+                encoding: .utf8
+            )
+        let syncAfterImport = try SessionTransferService.sessionsInSyncWindow(for: profile, now: now)
+        #expect(syncAfterImport.map(\.id) == ["one", "three"])
     }
 
     @Test("Uses the original user message times after indexing")
@@ -398,6 +465,28 @@ struct SessionTransferServiceTests {
             older|1795348800100|1795348800100
 
             """)
+        let olderRollout = directory.appending(path: "older.jsonl")
+        let attributes = try FileManager.default.attributesOfItem(atPath: olderRollout.path)
+        let date = try #require(attributes[.modificationDate] as? Date)
+        #expect(abs(date.timeIntervalSince1970 - 1795348800.1) < 0.001)
+
+        let fork = directory.appending(path: "fork.jsonl")
+        try rolloutData(threadID: "fork").write(to: fork)
+        try runSQLite(database: database, sql: """
+            INSERT INTO threads VALUES (
+                'fork', '\(fork.path)', NULL, 'visible', 1795435200, 1795435200000, 1795435200, 1795435200000
+            );
+            """)
+        try SessionTransferService.restoreIndexedRecency(
+            for: [.init(id: "fork", rolloutPath: fork.path, name: nil)],
+            in: profile,
+            inheritedActivity: ["fork": 1795348800100]
+        )
+        let forkActivity = try SQLiteQueryRunner.query(
+            databaseURL: database,
+            sql: "SELECT recency_at_ms FROM threads WHERE id = 'fork';"
+        )
+        #expect(String(decoding: forkActivity, as: UTF8.self) == "1795348800100\n")
     }
 
     @Test("Repairs an existing segmented conversation whose ancestors are not database rows")
