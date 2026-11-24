@@ -139,6 +139,7 @@ private struct RecentChatsSection: View {
     let store: UsageStore
     @ViewState private var renamingID: String?
     @ViewState private var draftTitle = ""
+    @ViewState private var shownCount = RecentClaudeChat.pageSize
     @FocusState private var isEditingTitle: Bool
 
     var body: some View {
@@ -159,11 +160,21 @@ private struct RecentChatsSection: View {
             } else {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
-                        ForEach(store.recentChats) { chat in
+                        ForEach(store.recentChats.prefix(shownCount)) { chat in
                             row(chat, now: context.date)
                         }
                     }
                 }
+                HStack(spacing: 12) {
+                    if store.recentChats.count > shownCount {
+                        Button("See more") { shownCount += RecentClaudeChat.pageSize }
+                    }
+                    if shownCount > RecentClaudeChat.pageSize {
+                        Button("See less") { shownCount = RecentClaudeChat.pageSize }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
             }
         }
         .padding(.horizontal, 12)
@@ -208,7 +219,7 @@ private struct RecentChatsSection: View {
         .help(tooltip(chat))
     }
 
-    /// Double-click the title to rename the conversation; Return saves, Escape cancels.
+    /// The pen button renames the conversation; Return saves, Escape cancels.
     @ViewBuilder
     private func title(_ chat: RecentClaudeChat) -> some View {
         if renamingID == chat.id {
@@ -226,22 +237,23 @@ private struct RecentChatsSection: View {
                 .onExitCommand { renamingID = nil }
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Text(chat.title)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { startRenaming(chat) }
-                .contextMenu {
-                    Button("Rename…") { startRenaming(chat) }
+            HStack(spacing: 4) {
+                Text(chat.title)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Button {
+                    draftTitle = chat.title
+                    renamingID = chat.id
+                } label: {
+                    Image(systemName: "pencil")
                 }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Rename this conversation")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private func startRenaming(_ chat: RecentClaudeChat) {
-        draftTitle = chat.title
-        renamingID = chat.id
     }
 
     private func suggestion(_ move: ChatMove) -> some View {
@@ -300,7 +312,7 @@ private struct RecentChatsSection: View {
     }
 
     private func tooltip(_ chat: RecentClaudeChat) -> String {
-        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)", "Double-click the title to rename it."]
+        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)"]
             .compactMap { $0 }
             .joined(separator: "\n")
     }

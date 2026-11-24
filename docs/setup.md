@@ -88,7 +88,8 @@ until the reset. **idle** means the window has not started; the app starts it
 with one small request to the smallest model, at most once an hour.
 
 **Move a conversation to another account.** Below the accounts, **Recent
-chats** lists the eight newest conversations across accounts. Click
+chats** lists the eight newest conversations across accounts, as named in the
+Claude app; **See more** shows more, and archived ones are left out. Click
 **→ claude-work** on a row to copy that conversation. The original stays where
 it is. Then continue it from the same project folder:
 
@@ -112,9 +113,9 @@ an account becomes low.
 To copy the three newest conversations at once, right-click the source account
 and then the destination account.
 
-**Rename a conversation.** Double-click its title in Recent chats, or
-right-click it and choose **Rename…**, type the new name and press Return.
-Claude Code's `/resume` shows the new name too.
+**Rename a conversation.** Click the pen next to its title in Recent chats,
+type the new name and press Return. Claude Code's `/resume` shows the new
+name too; the Claude app keeps its own title.
 
 **Reconnect an account.** When an account box shows an error instead of its
 limits, click **Reconnect** to read it again. If it is still disconnected,

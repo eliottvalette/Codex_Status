@@ -16,7 +16,7 @@ struct ClaudeRecentChatsTests {
         let aiTitle = #"{"type":"ai-title","aiTitle":"Repair login page","sessionId":"s1"}"#
         let customTitle = #"{"type":"custom-title","customTitle":"Login","sessionId":"s1"}"#
         func title(_ lines: [String]) -> String {
-            ClaudeChatCatalog.summarize(transcript(lines)).title
+            ClaudeChatCatalog.summarize(transcript(lines)).title()
         }
 
         #expect(title(prompts) == "Fix the login page")
@@ -81,7 +81,7 @@ struct ClaudeRecentChatsTests {
         let modifiedAt = Date(timeIntervalSince1970: 1_795_400_000.25)
         let lines = [prompt("one", at: "2026-11-20T10:00:00Z")]
         try write(lines, to: work, name: "s1", modifiedAt: modifiedAt)
-        let catalog = ClaudeChatCatalog()
+        let catalog = ClaudeChatCatalog(home: home)
 
         #expect(await catalog.recentChats(in: [work, personal]).map(\.copiedToProfileIDs) == [[]])
 
@@ -105,7 +105,7 @@ struct ClaudeRecentChatsTests {
         let work = profile("claude-work", in: home)
         let modifiedAt = Date(timeIntervalSince1970: 1_795_000_000)
         try write([prompt("aaa", at: "2026-11-20T10:00:00Z")], to: work, name: "s1", modifiedAt: modifiedAt)
-        let catalog = ClaudeChatCatalog()
+        let catalog = ClaudeChatCatalog(home: home)
         #expect(await catalog.recentChats(in: [work]).map(\.title) == ["aaa"])
 
         try write([prompt("bbb", at: "2026-11-20T10:00:00Z")], to: work, name: "s1", modifiedAt: modifiedAt)
@@ -124,7 +124,7 @@ struct ClaudeRecentChatsTests {
         let modifiedAt = Date(timeIntervalSince1970: 1_795_000_000)
         try write([prompt("one", at: "2026-11-20T10:00:00Z")], to: work, name: "s1", modifiedAt: modifiedAt)
         try write([prompt("two", at: "2026-11-20T11:00:00Z")], to: work, name: "s2", modifiedAt: modifiedAt)
-        let chat = try #require(await ClaudeChatCatalog().recentChats(in: [work, personal]).last)
+        let chat = try #require(await ClaudeChatCatalog(home: home).recentChats(in: [work, personal]).last)
         let service = ClaudeSessionTransferService()
 
         let result = try await service.transferSession(chat.file, from: work, to: personal)
@@ -155,7 +155,7 @@ struct ClaudeRecentChatsTests {
         let modifiedAt = Date(timeIntervalSince1970: 1_795_400_000)
         try write([prompt("one", at: "2026-11-20T10:00:00Z")], to: work, name: "s1", modifiedAt: modifiedAt)
         try write([prompt("one", at: "2026-11-20T10:00:00Z")], to: personal, name: "s1", modifiedAt: modifiedAt)
-        let catalog = ClaudeChatCatalog()
+        let catalog = ClaudeChatCatalog(home: home)
         let chat = try #require(await catalog.recentChats(in: [work, personal]).first)
 
         try ClaudeChatCatalog.rename(chat, to: "  Login \"fix\"/v2 ", in: [work, personal])
@@ -173,6 +173,43 @@ struct ClaudeRecentChatsTests {
         #expect(throws: ClaudeSessionTransferError.incompleteTranscript(sessionID: "s1")) {
             try ClaudeChatCatalog.rename(chat, to: "Other", in: [work])
         }
+    }
+
+    @Test("Leaves out what the Claude app archived and uses the app's titles")
+    func followsTheClaudeApp() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = profile("claude-work", in: home)
+        let modifiedAt = Date(timeIntervalSince1970: 1_795_400_000)
+        for (index, name) in ["s0", "s1", "s2", "s3"].enumerated() {
+            try write([prompt(name, at: "2026-11-20T1\(index):00:00Z")], to: work, name: name, modifiedAt: modifiedAt)
+        }
+        try write(
+            [prompt("s3", at: "2026-11-20T13:00:00Z"), #"{"type":"custom-title","customTitle":"Renamed here","sessionId":"s3"}"#],
+            to: work, name: "s3", modifiedAt: modifiedAt
+        )
+        let records = home.appending(path: "Library/Application Support/Claude/claude-code-sessions/account/org")
+        try FileManager.default.createDirectory(at: records, withIntermediateDirectories: true)
+        func record(_ file: String, _ sessionID: String, archived: Bool, title: String) throws {
+            let json = #"{"sessionId":"\#(file)","cliSessionId":"\#(sessionID)","isArchived":\#(archived),"title":"\#(title)","enabledMcpTools":{}}"#
+            try Data(json.utf8).write(to: records.appending(path: "\(file).json"))
+        }
+        try record("local_a", "s0", archived: true, title: "Archived")
+        try record("local_b", "s1", archived: false, title: "From the app")
+        try record("local_c", "s3", archived: false, title: "App title")
+        try Data("{}".utf8).write(to: records.appending(path: "account-plugins-sent.json"))
+        let catalog = ClaudeChatCatalog(home: home)
+
+        let chats = await catalog.recentChats(in: [work])
+
+        #expect(chats.map(\.file.sessionID) == ["s3", "s2", "s1"], "s0 is archived in the app")
+        #expect(chats.map(\.title) == ["Renamed here", "s2", "From the app"])
+
+        try record("local_a", "s0", archived: false, title: "Restored")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: records.appending(path: "local_a.json").path
+        )
+        #expect(await catalog.recentChats(in: [work]).last?.title == "Restored")
     }
 
     @Test("Builds a command that resumes the conversation in a given account")

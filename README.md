@@ -81,16 +81,18 @@ copied conversation in `/resume`.
 
 With two or more Claude accounts, **Recent chats** below the accounts lists
 the eight newest Claude conversations across them, with the account, the time
-since your last message, the title, and the project folder. Click
+since your last message, the title, and the project folder; **See more**
+shows more. Conversations archived in the Claude desktop app are left out, and
+its titles are used. Cloud sessions are not listed: they have no copy on the
+Mac. Click
 **→ account** on a row to copy that one conversation; with three or more
 accounts, choose the destination from **Copy to…**. A conversation that
 already has an identical copy on another account is listed once, with a ✓
 next to that account. After a copy, the command that resumes the
 conversation in the destination is on the clipboard, ready to paste in a
 terminal. The copy button on each row puts the command for the row's account
-there. Double-click a title, or right-click it and choose **Rename…**, to
-rename the conversation; the new name also shows in Claude Code's `/resume`
-and in `claude-who`.
+there. The pen next to a title renames the conversation; the new name also
+shows in Claude Code's `/resume` and in `claude-who`.
 
 When a Claude account is low, Recent chats suggests moving its chats to the
 Claude account with the most room, with a **Move** button. The settings menu
@@ -289,8 +291,12 @@ open dist/CodexMeter.app
   Settings live in the app's user defaults.
 - **Claude recent chats.** The list reads the transcripts of every Claude
   profile, newest first, and sorts them by the last message the user typed, as
-  `claude-who` does. The title is the custom title, then the AI title, then the
-  summary, then the first prompt. A transcript is read again only when its
+  `claude-who` does. The title is the custom title, then the Claude desktop
+  app's title, then the AI title, then the summary, then the first prompt. The
+  desktop app keeps one file per local Code session under
+  `~/Library/Application Support/Claude/claude-code-sessions/`; the app reads
+  only `cliSessionId`, `isArchived` and `title` from it, and leaves out
+  archived conversations. A transcript is read again only when its
   modification time or size changes. Only lines whose record type, written near
   the start of the line, marks a title or a prompt are parsed; tool results,
   most of a long transcript, are skipped unparsed. A copy counts as identical

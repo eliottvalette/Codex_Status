@@ -9,6 +9,11 @@ import Musl
 
 /// One conversation in the recent-chats list below the Claude accounts.
 struct RecentClaudeChat: Identifiable, Equatable, Sendable {
+    /// Rows shown at first, and added by each See more.
+    static let pageSize = 8
+    /// Rows loaded for See more.
+    static let listLimit = 24
+
     let profileID: String
     let file: ClaudeSessionTransferService.TranscriptFile
     let title: String
@@ -63,8 +68,9 @@ actor ClaudeChatCatalog {
         var workingDirectory: String?
 
         /// The order `claude-who` uses.
-        var title: String {
-            [customTitle, aiTitle, summary, firstPrompt]
+        /// The order `claude-who` uses, with the Claude app's title after a custom one.
+        func title(appTitle: String? = nil) -> String {
+            [customTitle, appTitle, aiTitle, summary, firstPrompt]
                 .compactMap { $0.map(ClaudeChatCatalog.cleanTitle) }
                 .first { $0.isEmpty == false } ?? "[untitled]"
         }
@@ -80,15 +86,64 @@ actor ClaudeChatCatalog {
     /// Every record type sits within the first few hundred bytes of its line.
     private static let headLength = 4_096
 
-    private let home: URL
-    private var cache: [String: CacheEntry] = [:]
+    /// What the Claude desktop app keeps about one of its Code sessions.
+    struct AppSession: Equatable, Sendable {
+        let isArchived: Bool
+        let title: String?
+    }
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    private let home: URL
+    private let appSessionsURL: URL
+    private var cache: [String: CacheEntry] = [:]
+    private var appSessionCache: [String: (modifiedAt: Date, sessionID: String?, session: AppSession)] = [:]
+
+    /// `appSessionsURL` is where the Claude desktop app keeps one small JSON file per local
+    /// Code session. The list hides the sessions archived there and uses their titles.
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        appSessionsURL: URL? = nil
+    ) {
         self.home = home
+        self.appSessionsURL = appSessionsURL
+            ?? home.appending(path: "Library/Application Support/Claude/claude-code-sessions")
+    }
+
+    /// The Claude app's sessions by Claude Code session ID. Only `cliSessionId`,
+    /// `isArchived` and `title` are read, and a file is read again only when it changes.
+    func appSessions() -> [String: AppSession] {
+        let fileManager = FileManager.default
+        func contents(_ url: URL) -> [URL] {
+            (try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        }
+        var found: [String: AppSession] = [:]
+        var seen = Set<String>()
+        // <account>/<organization>/local_<id>.json
+        for url in contents(appSessionsURL).flatMap(contents).flatMap(contents)
+        where url.lastPathComponent.hasPrefix("local_") && url.pathExtension == "json" {
+            guard let modifiedAt = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            else { continue }
+            seen.insert(url.path)
+            if appSessionCache[url.path]?.modifiedAt != modifiedAt {
+                let record = (try? Data(contentsOf: url))
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                appSessionCache[url.path] = (
+                    modifiedAt,
+                    record["cliSessionId"] as? String,
+                    AppSession(isArchived: record["isArchived"] as? Bool == true, title: record["title"] as? String)
+                )
+            }
+            guard let entry = appSessionCache[url.path], let sessionID = entry.sessionID else { continue }
+            // A session the app still shows anywhere is not archived.
+            if found[sessionID]?.isArchived == false { continue }
+            found[sessionID] = entry.session
+        }
+        appSessionCache = appSessionCache.filter { seen.contains($0.key) }
+        return found
     }
 
     func recentChats(in profiles: [CodexProfile], limit: Int = 8) -> [RecentClaudeChat] {
         let limit = max(1, limit)
+        let appSessions = appSessions()
         var files: [(profile: CodexProfile, file: ClaudeSessionTransferService.TranscriptFile)] = []
         for profile in profiles {
             // An account whose folder cannot be listed is left out rather than failing the list.
@@ -112,6 +167,8 @@ actor ClaudeChatCatalog {
                 let cutoff = chats.values.map(\.at).sorted(by: >)[limit - 1]
                 if file.modifiedAt < cutoff { break }
             }
+            // A conversation archived in the Claude app is left out, as the app's menu does.
+            if appSessions[file.sessionID]?.isArchived == true { continue }
             guard let summary = summary(of: file), let lastMessageAt = summary.lastUserMessageAt else {
                 continue
             }
@@ -133,7 +190,7 @@ actor ClaudeChatCatalog {
                 RecentClaudeChat(
                     profileID: entry.profile.id,
                     file: entry.file,
-                    title: entry.summary.title,
+                    title: entry.summary.title(appTitle: appSessions[entry.file.sessionID]?.title),
                     workingDirectory: entry.summary.workingDirectory,
                     folderName: folderName(entry.summary.workingDirectory, project: entry.file.projectDirectoryName),
                     lastMessageAt: entry.at,

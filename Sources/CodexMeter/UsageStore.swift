@@ -37,7 +37,7 @@ final class UsageStore {
         claudeClient: ClaudeUsageClient = ClaudeUsageClient(),
         transferService: SessionTransferService = SessionTransferService(),
         claudeTransferService: ClaudeSessionTransferService = ClaudeSessionTransferService(),
-        chatCatalog: ClaudeChatCatalog = ClaudeChatCatalog(),
+        chatCatalog: ClaudeChatCatalog? = nil,
         settings: AppSettings = AppSettings(),
         desktop: any DesktopActions = Desktop(),
         home: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -55,7 +55,7 @@ final class UsageStore {
         clients = ProviderClients(codex: client, claude: claudeClient)
         self.transferService = transferService
         self.claudeTransferService = claudeTransferService
-        self.chatCatalog = chatCatalog
+        self.chatCatalog = chatCatalog ?? ClaudeChatCatalog(home: home)
         self.settings = settings
         self.desktop = desktop
         self.home = home
@@ -206,7 +206,7 @@ final class UsageStore {
             recentChats = []
             return
         }
-        recentChats = await chatCatalog.recentChats(in: claudeProfiles)
+        recentChats = await chatCatalog.recentChats(in: claudeProfiles, limit: RecentClaudeChat.listLimit)
     }
 
     /// Copies one conversation from the recent-chats list. The original stays where it is.
@@ -244,7 +244,8 @@ final class UsageStore {
     /// The move to suggest, or to make on its own, under the chat setting.
     var chatMove: ChatMove? {
         guard settings.chatMoves != .off else { return nil }
-        return LowLimits.chatMove(statuses: statuses, chats: recentChats)
+        // Only the chats shown before See more, so the suggestion matches what is on screen.
+        return LowLimits.chatMove(statuses: statuses, chats: Array(recentChats.prefix(RecentClaudeChat.pageSize)))
     }
 
     func copyResumeCommand(for chat: RecentClaudeChat) {
