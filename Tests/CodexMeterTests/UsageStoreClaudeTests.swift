@@ -131,10 +131,11 @@ final class UsageStoreClaudeTests {
         await store.reconnect(personal.id)
         #expect(store.statuses[1].signIn == .signedIn(email: "me@example.com"))
         #expect(store.statuses[1].errorMessage == nil)
-        #expect(recorder.signIns == [personal.id])
+        #expect(store.transferFeedback?.message == "✓ claude-personal reconnected")
+        #expect(recorder.signIns == [personal.id], "a reconnected account opens nothing")
     }
 
-    @Test("Reconnect reads a paused account again at once")
+    @Test("Reconnect reads a paused account at once, and opens Terminal while it stays disconnected")
     func reconnectEndsThePause() async throws {
         let home = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -142,12 +143,20 @@ final class UsageStoreClaudeTests {
         try Data().write(to: work.homeURL.appending(path: "limited"))
         let store = try makeStore([work], home: home)
         await store.refresh()
-        try FileManager.default.removeItem(at: work.homeURL.appending(path: "limited"))
+        let reads = try calls(work).filter { $0 == "usage" }.count
 
+        await store.reconnect(work.id)
+
+        #expect(try calls(work).filter { $0 == "usage" }.count == reads + 1, "the pause does not hold it back")
+        #expect(recorder.signIns == [work.id])
+        #expect(store.transferFeedback?.message.hasPrefix("claude-work is still disconnected") == true)
+
+        try FileManager.default.removeItem(at: work.homeURL.appending(path: "limited"))
         await store.reconnect(work.id)
 
         #expect(store.statuses[0].errorMessage == nil)
         #expect(store.statuses[0].snapshot?.weeklyWindow?.remainingPercent == 80)
+        #expect(recorder.signIns == [work.id])
     }
 
     @Test("Adds an account, shows it, and opens Terminal to sign in")

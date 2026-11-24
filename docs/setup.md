@@ -112,12 +112,14 @@ an account becomes low.
 To copy the three newest conversations at once, right-click the source account
 and then the destination account.
 
-**Rename a conversation.** Double-click its title in Recent chats, type the
-new name and press Return. Claude Code's `/resume` shows the new name too.
+**Rename a conversation.** Double-click its title in Recent chats, or
+right-click it and choose **Rename…**, type the new name and press Return.
+Claude Code's `/resume` shows the new name too.
 
 **Reconnect an account.** When an account box shows an error instead of its
-limits, click **Reconnect**. If the account is signed out, Terminal opens in
-it so you can sign in with `/login`; click **Reconnect** again afterwards.
+limits, click **Reconnect** to read it again. If it is still disconnected,
+Terminal opens in it so you can sign in again with `/login`; click
+**Reconnect** once more afterwards.
 
 **Find a conversation.** In a project folder, run `claude-who` to see the ten
 latest conversations there, across accounts, with the account to open.

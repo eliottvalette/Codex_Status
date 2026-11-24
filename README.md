@@ -56,8 +56,8 @@ those limits, and the menu bar figure counts it.
   can turn it off.
 - **Accounts.** Each Claude account shows the email it is signed in as. When
   an account has no current reading, because it is signed out or its usage
-  cannot be read, **Reconnect** reads it again at once and, if it is signed
-  out, opens Terminal in that account so you can sign in. The **+** button at
+  cannot be read, **Reconnect** reads it again at once and, if it is still
+  disconnected, opens Terminal in that account so you can sign in again. The **+** button at
   the bottom adds a Claude account: it creates `~/.claude-<name>` and a
   `claude-<name>` alias, then opens Terminal there to sign in.
 - **Low limits.** An account is low when any of its limits has 10% or less
@@ -88,8 +88,9 @@ already has an identical copy on another account is listed once, with a ✓
 next to that account. After a copy, the command that resumes the
 conversation in the destination is on the clipboard, ready to paste in a
 terminal. The copy button on each row puts the command for the row's account
-there. Double-click a title to rename the conversation; the new name also
-shows in Claude Code's `/resume` and in `claude-who`.
+there. Double-click a title, or right-click it and choose **Rename…**, to
+rename the conversation; the new name also shows in Claude Code's `/resume`
+and in `claude-who`.
 
 When a Claude account is low, Recent chats suggests moving its chats to the
 Claude account with the most room, with a **Move** button. The settings menu

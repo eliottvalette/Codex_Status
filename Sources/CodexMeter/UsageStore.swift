@@ -280,20 +280,26 @@ final class UsageStore {
         report("Sign in to \(profile.displayName) in Terminal, then press Reconnect", style: .progress)
     }
 
-    /// Reads a disconnected Claude account again at once. When it turns out to be signed
-    /// out, opens Terminal in it to sign in.
+    /// Reads a disconnected Claude account again at once. When it is still disconnected,
+    /// opens Terminal in it so the user can sign in again.
     func reconnect(_ profileID: String) async {
         guard
             isRefreshing == false,
             let index = statuses.firstIndex(where: { $0.id == profileID }),
             statuses[index].profile.provider == .claude
         else { return }
+        let name = statuses[index].profile.displayName
         claudeUsagePausedUntil[profileID] = nil
         statuses[index].signIn = nil
+        report("Reconnecting \(name)…", style: .progress)
         await refresh()
-        guard let status = statuses.first(where: { $0.id == profileID }), status.signIn == .signedOut else { return }
+        guard let status = statuses.first(where: { $0.id == profileID }) else { return }
+        if status.errorMessage == nil, status.signIn != .signedOut {
+            report("✓ \(name) reconnected", style: .success)
+            return
+        }
         desktop.openSignIn(for: status.profile)
-        report("Sign in to \(status.profile.displayName) in Terminal, then press Reconnect", style: .progress)
+        report("\(name) is still disconnected. Sign in again in Terminal with /login, then press Reconnect.", style: .progress)
     }
 
     func report(_ message: String, style: TransferFeedback.Style) {

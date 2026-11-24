@@ -213,9 +213,10 @@ private struct RecentChatsSection: View {
     private func title(_ chat: RecentClaudeChat) -> some View {
         if renamingID == chat.id {
             TextField("Title", text: $draftTitle)
-                .textFieldStyle(.plain)
+                .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11))
                 .focused($isEditingTitle)
+                .background(TakesKeyboard())
                 .onAppear { isEditingTitle = true }
                 .onSubmit {
                     renamingID = nil
@@ -231,11 +232,16 @@ private struct RecentChatsSection: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    draftTitle = chat.title
-                    renamingID = chat.id
+                .onTapGesture(count: 2) { startRenaming(chat) }
+                .contextMenu {
+                    Button("Rename…") { startRenaming(chat) }
                 }
         }
+    }
+
+    private func startRenaming(_ chat: RecentClaudeChat) {
+        draftTitle = chat.title
+        renamingID = chat.id
     }
 
     private func suggestion(_ move: ChatMove) -> some View {
@@ -395,7 +401,7 @@ private struct AliasQuadrant: View {
                     .buttonStyle(.borderless)
                     .padding(.top, 9)
                     .padding(.trailing, 12)
-                    .help("Read this account again. Opens Terminal to sign in when it is signed out.")
+                    .help("Read this account again. If it is still disconnected, opens Terminal in it to sign in again.")
             }
         }
     }
@@ -687,6 +693,21 @@ private struct QuotaGauge: View {
 
 // MARK: - Control row
 
+/// Makes the menu bar panel take the keyboard, so typing reaches the text field it sits
+/// behind. The app runs in the background, and its panel does not take the keyboard on its own.
+private struct TakesKeyboard: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            NSApp.activate()
+            view.window?.makeKey()
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 /// Creates a Claude account and opens Terminal in it to sign in.
 private struct AddAccountButton: View {
     let store: UsageStore
@@ -711,6 +732,7 @@ private struct AddAccountButton: View {
                 Text("Add a Claude account")
                     .font(.headline)
                 TextField("Name, such as work", text: $name)
+                    .background(TakesKeyboard())
                     .onSubmit(add)
                 Text("Creates ~/.claude-\(accountName ?? "name") and a claude-\(accountName ?? "name") alias, then opens Terminal so you can sign in.")
                     .font(.caption)
