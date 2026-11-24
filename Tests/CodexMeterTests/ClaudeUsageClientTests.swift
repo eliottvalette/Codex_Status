@@ -161,6 +161,14 @@ struct ClaudeUsageClientTests {
         #expect(throws: ClaudeUsageError.planLimitsUnavailable) {
             try ClaudeUsageParser.parseResponseLine(apiKeyProfile)
         }
+        // A signed-in plan whose limits Claude Code could not fetch, for example after a 429.
+        let unfetched = response("""
+            "response":{"subscription_type":null,"rate_limits_available":true,"rate_limits":null}
+            """)
+        #expect(throws: ClaudeUsageError.usageTemporarilyUnavailable) {
+            try ClaudeUsageParser.parseResponseLine(unfetched)
+        }
+        #expect(ClaudeUsageError.usageTemporarilyUnavailable.errorDescription?.contains("/login") == false)
         // Claude Code 2.1.112 answers the usage request this way.
         #expect(throws: ClaudeUsageError.unsupportedVersion) {
             try ClaudeUsageParser.parseResponseLine(response(

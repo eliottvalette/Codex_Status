@@ -18,6 +18,10 @@ struct UsageStoreClaudeTests {
           *)
             read request
             echo usage >> "$calls"
+            if [ -f "$CLAUDE_CONFIG_DIR/limited" ]; then
+              echo '{"type":"control_response","response":{"subtype":"success","request_id":"codex-meter-usage","response":{"rate_limits_available":true,"rate_limits":null}}}'
+              exit 0
+            fi
             if [ -f "$CLAUDE_CONFIG_DIR/window" ]; then used=1; reset='"2099-01-01T00:00:00Z"'; else used=0; reset=null; fi
             echo "{\\"type\\":\\"control_response\\",\\"response\\":{\\"subtype\\":\\"success\\",\\"request_id\\":\\"codex-meter-usage\\",\\"response\\":{\\"subscription_type\\":\\"max\\",\\"rate_limits_available\\":true,\\"rate_limits\\":{\\"five_hour\\":{\\"utilization\\":$used,\\"resets_at\\":$reset},\\"seven_day\\":{\\"utilization\\":20,\\"resets_at\\":\\"2099-01-01T00:00:00Z\\"}}}}}"
             ;;
@@ -62,6 +66,23 @@ struct UsageStoreClaudeTests {
         #expect(try calls(work).filter { $0 == "activation" }.count == 1)
         #expect(store.statuses[0].snapshot?.shortWindow?.state == .dormant)
         #expect(store.statuses[0].snapshot?.shortWindow?.remainingPercent == 100)
+    }
+
+    @Test("Keeps the last reading while the usage service is limiting reads")
+    func keepsReadingWhenUsageIsUnavailable() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let store = try makeStore([work], home: home)
+        await store.refresh()
+        let reading = try #require(store.statuses[0].snapshot)
+
+        try Data().write(to: work.homeURL.appending(path: "limited"))
+        await store.refresh()
+
+        #expect(store.statuses[0].snapshot == reading)
+        #expect(store.statuses[0].isStale)
+        #expect(store.statuses[0].errorMessage == ClaudeUsageError.usageTemporarilyUnavailable.errorDescription)
     }
 
     @Test("Shows why a Claude profile has no quota")

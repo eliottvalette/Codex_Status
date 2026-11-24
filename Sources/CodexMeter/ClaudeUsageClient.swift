@@ -5,6 +5,7 @@ enum ClaudeUsageError: Error, Equatable, LocalizedError {
     case unsupportedVersion
     case missingResult
     case planLimitsUnavailable
+    case usageTemporarilyUnavailable
     case activationFailed(String)
 
     var errorDescription: String? {
@@ -17,6 +18,8 @@ enum ClaudeUsageError: Error, Equatable, LocalizedError {
             "The Claude usage response did not contain a result."
         case .planLimitsUnavailable:
             "This profile has no Claude plan limits. Sign in with a Claude subscription using /login."
+        case .usageTemporarilyUnavailable:
+            "Usage is unavailable for now, usually because the usage service is limiting reads. The app tries again at the next refresh."
         case let .activationFailed(message):
             "Claude Code could not start the usage window: \(message)"
         }
@@ -105,11 +108,13 @@ enum ClaudeUsageParser {
         guard let result = response["response"] as? [String: Any] else {
             throw ClaudeUsageError.missingResult
         }
-        guard
-            result["rate_limits_available"] as? Bool != false,
-            let rateLimits = result["rate_limits"] as? [String: Any]
-        else {
+        guard result["rate_limits_available"] as? Bool != false else {
             throw ClaudeUsageError.planLimitsUnavailable
+        }
+        // A signed-in plan with no limits in the answer means Claude Code could not fetch
+        // them, for example after the usage service answered 429. That clears by itself.
+        guard let rateLimits = result["rate_limits"] as? [String: Any] else {
+            throw ClaudeUsageError.usageTemporarilyUnavailable
         }
 
         return QuotaSnapshot(
