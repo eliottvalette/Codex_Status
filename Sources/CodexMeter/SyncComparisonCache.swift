@@ -31,13 +31,14 @@ struct SyncComparisonCache: Codable {
         let recency: Int64
     }
 
-    struct Entry: Codable {
+    struct Entry: Codable, Equatable {
         let sourcePath: String
         let destination: IndexedRollout
         let files: [String: FileStamp]
         let indexedParents: [String: String]
         let historySegments: [String: String]
         var issue: String? = nil
+        var reconciledParent: FileStamp? = nil
 
         func matches(
             sourcePath: String,

@@ -148,6 +148,42 @@ struct SessionTransferServiceTests {
         ))
     }
 
+    @Test("Fast-forwards the original ID only from a matching imported fork")
+    func fastForwardsImportedFork() throws {
+        let base = Data("""
+            {"type":"session_meta","payload":{"id":"original"}}
+            {"timestamp":"1970-01-01T00:00:01Z","type":"event_msg","payload":{"type":"user_message"}}
+
+            """.utf8)
+        let suffix = Data("""
+            {"timestamp":"1970-01-01T00:00:02Z","type":"event_msg","payload":{"type":"user_message"}}
+
+            """.utf8)
+        let branch = Data("""
+            {"type":"session_meta","payload":{"id":"fork","forked_from_id":"original","forked_from_ordinal_exclusive":2,"history_base":{"thread_id":"original","end_ordinal_exclusive":2,"end_byte_offset":\(base.count)}}}
+
+            """.utf8) + suffix
+
+        func reconcile(_ parent: Data, _ branch: Data) throws -> Data? {
+            try SessionTransferService.fastForwardedHistory(
+                parent: parent, base: base, branch: branch, parentID: "original", branchID: "fork", baseline: 1_000
+            )
+        }
+
+        #expect(try reconcile(base, branch) == base + suffix)
+        #expect(try reconcile(base + suffix, branch) == base + suffix)
+        let settings = Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\"}}\n".utf8)
+        #expect(try reconcile(base + settings, branch) == base + settings + suffix)
+        #expect {
+            try reconcile(base + Data("{\"type\":\"compacted\"}\n".utf8), branch)
+        } throws: { error in
+            guard case SessionTransferError.divergentHistory("original") = error else { return false }
+            return true
+        }
+        let differentBase = Data(String(decoding: base, as: UTF8.self).replacingOccurrences(of: "00:01Z", with: "00:00Z").utf8)
+        #expect(try reconcile(differentBase, branch) == nil)
+    }
+
     @Test("Persists successful comparisons and invalidates changed parents and index rows")
     func invalidatesPersistedComparison() throws {
         let directory = try temporaryDirectory()

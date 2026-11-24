@@ -56,7 +56,10 @@ conversation has different histories on two accounts, the sync reports the
 conflict, keeps both copies, and continues with other conversations. When
 Codex filters a copied conversation out of the destination account's
 `/resume` list, CodexMeter creates a branch under that account with the
-original conversation's last-message time.
+original conversation's last-message time. If that branch is continued and
+its starting point still matches the original, the next sync advances the
+original conversation under the same ID. Independent continuations are
+preserved.
 
 ## For agents
 

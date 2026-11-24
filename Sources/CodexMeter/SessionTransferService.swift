@@ -5,6 +5,7 @@ struct SessionTransferResult: Sendable, Equatable {
     let sessionCount: Int
     let copiedCount: Int
     var pickerImportsCount = 0
+    var reconciledCount = 0
 
     var alreadyPresentCount: Int {
         sessionCount - copiedCount
@@ -20,6 +21,7 @@ private struct PickerImport: Codable {
     let sourceID: String
     let forkID: String
     let activityMilliseconds: Int64
+    var recencyRestored: Bool? = nil
 }
 
 enum SessionTransferError: Error, LocalizedError {
@@ -121,27 +123,42 @@ struct SessionTransferService: Sendable {
     @concurrent
     func syncRecentSessions(across profiles: [CodexProfile], now: Date = .now) async throws -> SessionSyncResult {
         var result = SessionSyncResult()
-        var sources: [(CodexProfile, [SessionRecord])] = []
+        var sources: [(CodexProfile, [SessionRecord], [String: [PickerImport]])] = []
+        let pickers = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, PickerConnection()) })
         for profile in profiles {
             do {
+                let imports = try Self.pickerImports(in: profile)
                 let sessions = try Self.sessionsInSyncWindow(for: profile, now: now) { issue in
                     result.issues.append("\(profile.displayName): \(issue)")
                 }
-                sources.append((profile, sessions))
+                sources.append((profile, sessions, Dictionary(grouping: imports, by: \.forkID)))
             } catch {
                 result.issues.append("\(profile.displayName): \(error.localizedDescription)")
             }
         }
-        for (source, sessions) in sources where !sessions.isEmpty {
+        for (source, sessions, continuedImports) in sources where !sessions.isEmpty {
+            let rolloutInventory = RolloutInventory()
+            let availableSessions: [SessionRecord]
+            do {
+                availableSessions = try Self.allSessions(for: source)
+            } catch {
+                result.issues.append("\(source.displayName): \(error.localizedDescription)")
+                continue
+            }
             for destination in profiles where destination.id != source.id {
                 try Task.checkCancellation()
                 let prefix = "\(source.displayName) → \(destination.displayName)"
                 do {
-                    let transfer = try transfer(sessions, from: source, to: destination) { issue in
+                    let transfer = try transfer(
+                        sessions, from: source, to: destination, rolloutInventory: rolloutInventory,
+                        availableSessions: availableSessions, continuedImports: continuedImports,
+                        picker: pickers[destination.id]
+                    ) { issue in
                         result.issues.append("\(prefix): \(issue)")
                     }
-                    result.updatedCount += transfer.copiedCount + transfer.pickerImportsCount
+                    result.updatedCount += transfer.copiedCount + transfer.pickerImportsCount + transfer.reconciledCount
                 } catch {
+                    pickers[destination.id]?.reset()
                     result.issues.append("\(prefix): \(error.localizedDescription)")
                 }
             }
@@ -153,18 +170,16 @@ struct SessionTransferService: Sendable {
         _ sessions: [SessionRecord],
         from source: CodexProfile,
         to destination: CodexProfile,
+        rolloutInventory: RolloutInventory = RolloutInventory(),
+        availableSessions: [SessionRecord]? = nil,
+        continuedImports: [String: [PickerImport]] = [:],
+        picker: PickerConnection? = nil,
         onSyncIssue: ((String) -> Void)? = nil
     ) throws -> SessionTransferResult {
-        let availableSessions = try Self.allSessions(for: source)
-        let destinationRecords: [String: SessionRecord]
-        if onSyncIssue != nil {
-            let database = destination.homeURL.appending(path: "state_5.sqlite")
-            let indexed = FileManager.default.fileExists(atPath: database.path)
-                ? try Self.allSessions(for: destination) : []
-            destinationRecords = Dictionary(uniqueKeysWithValues: indexed.map { ($0.id, $0) })
-        } else {
-            destinationRecords = [:]
-        }
+        let availableSessions = try availableSessions ?? Self.allSessions(for: source)
+        let sourceRecords = Dictionary(uniqueKeysWithValues: availableSessions.map { ($0.id, $0) })
+        let destinationIndex = onSyncIssue == nil ? nil : try Self.syncIndex(in: destination)
+        let destinationRecords = destinationIndex?.records ?? [:]
         let comparisonKey = source.homeURL.resolvingSymlinksInPath().path
         var comparisonCache: SyncComparisonCache?
         if let onSyncIssue {
@@ -175,11 +190,11 @@ struct SessionTransferService: Sendable {
                 comparisonCache = SyncComparisonCache()
             }
         }
-        let indexedRollouts = comparisonCache == nil ? [:] : try Self.cacheIndexedRollouts(in: destination)
+        let indexedRollouts = destinationIndex?.rollouts ?? [:]
         let entries = comparisonCache?.sources[comparisonKey] ?? [:]
         let availablePaths = Dictionary((availableSessions + sessions).map { ($0.id, $0.rolloutPath) }) { _, selected in selected }
         let segmentIDs = Set(entries.values.flatMap { $0.historySegments.keys })
-        let segmentPaths = segmentIDs.isEmpty ? [:] : try Self.cacheSegmentPaths(segmentIDs, in: source)
+        let segmentPaths = segmentIDs.isEmpty ? [:] : try rolloutInventory.paths(in: source)
         let cached = sessions.filter { session in
             entries[session.id]?.matches(
                 sourcePath: session.rolloutPath,
@@ -239,12 +254,13 @@ struct SessionTransferService: Sendable {
                 }
             },
             onSkippedSession: onSyncIssue,
-            captureStamps: comparisonCache != nil
+            captureStamps: comparisonCache != nil,
+            rolloutInventory: rolloutInventory
         )
         let selected = prepared.filter { selectedPaths.contains($0.session.rolloutPath) }
         let selectedIDs = Set(selected.map(\.session.id))
         let requestedIDs = Set(sessions.map(\.id))
-        let visibleIDs = try Self.visibleSessionIDs(in: destination)
+        let visibleIDs = try destinationIndex?.visibleIDs ?? Self.visibleSessionIDs(in: destination)
         for index in prepared.indices where selectedPaths.contains(prepared[index].session.rolloutPath) {
             let item = prepared[index]
             if !visibleIDs.contains(item.session.id) || detachedPaths[item.session.id] != nil {
@@ -282,20 +298,59 @@ struct SessionTransferService: Sendable {
 
         var indexedSessions: [SessionRecord] = []
         var pickerImportsCount = 0
+        var reconciledParents: [String: SyncComparisonCache.FileStamp] = [:]
+        var reconciledCount = 0
+        let refreshedIndex = !copiedSessions.isEmpty || !previouslyCopiedSessions.isEmpty || !detachedPaths.isEmpty
+        var indexAfterCopy = destinationIndex
         do {
             try Self.repairDetachedIndexPaths(detachedPaths, using: selected, in: destination)
             if !copiedSessions.isEmpty {
                 indexedSessions = try index(sessions: copiedSessions, in: destination, onIssue: onSyncIssue)
             }
             try Self.restoreIndexedRecency(for: indexedSessions + previouslyCopiedSessions, in: destination)
-            let visibleAfterIndexing = try Self.visibleSessionIDs(in: destination)
+            if destinationIndex != nil, refreshedIndex {
+                indexAfterCopy = try Self.syncIndex(in: destination)
+            }
+            let visibleAfterIndexing = try indexAfterCopy?.visibleIDs ?? Self.visibleSessionIDs(in: destination)
             for missing in selected where !visibleAfterIndexing.contains(missing.session.id) {
                 let error = SessionTransferError.invalidQueryResponse("Missing preview for \(missing.session.id).")
                 guard let onSyncIssue else { throw error }
                 onSyncIssue(error.localizedDescription)
             }
+            let picker = picker ?? PickerConnection()
+            var pickerParents: [String: String] = [:]
+            if let onSyncIssue {
+                for session in sessions {
+                    guard let imports = continuedImports[session.id], imports.count == 1, let imported = imports.first,
+                          let parent = destinationRecords[imported.sourceID],
+                          let base = sourceRecords[imported.sourceID],
+                          selectedIDs.contains(session.id) || (cachedIDs.contains(session.id) && entries[session.id]?.issue == nil),
+                          visibleAfterIndexing.contains(session.id) else { continue }
+                    do {
+                        if cachedIDs.contains(session.id), let stamp = entries[session.id]?.reconciledParent,
+                           let activity = session.activityMilliseconds,
+                           let indexedParent = indexedRollouts[parent.id], indexedParent.recency >= activity,
+                           SyncComparisonCache.FileStamp.read(parent.rolloutPath) == stamp {
+                            pickerParents[session.id] = parent.id
+                            reconciledParents[session.id] = stamp
+                            continue
+                        }
+                        let status = try fastForwardParent(parent, base: base, from: session, imported: imported,
+                                                           indexed: indexedRollouts[parent.id], in: destination)
+                        if status.matched {
+                            pickerParents[session.id] = parent.id
+                            reconciledParents[session.id] = SyncComparisonCache.FileStamp.read(parent.rolloutPath)
+                        }
+                        if status.updated { reconciledCount += 1 }
+                    } catch {
+                        onSyncIssue("\(session.name ?? session.id): \(error.localizedDescription)")
+                    }
+                }
+            }
             let pickerSessions = sessions.filter { visibleAfterIndexing.contains($0.id) }
-            pickerImportsCount = try ensurePickerVisibility(for: pickerSessions, in: destination, onIssue: onSyncIssue)
+            pickerImportsCount = try ensurePickerVisibility(
+                for: pickerSessions, in: destination, picker: picker, parentAlternatives: pickerParents, onIssue: onSyncIssue
+            )
         } catch {
             throw SessionTransferError.indexingFailed(
                 profile: destination.displayName,
@@ -306,7 +361,9 @@ struct SessionTransferService: Sendable {
 
         if var comparisonCache, let onSyncIssue {
             do {
-                let finalIndex = try Self.cacheIndexedRollouts(in: destination)
+                let finalIndex = reconciledCount == 0
+                    ? indexAfterCopy?.rollouts ?? [:]
+                    : try Self.syncIndex(in: destination).rollouts
                 var retained: [String: SyncComparisonCache.Entry] = [:]
                 for session in cached {
                     if let entry = entries[session.id], entry.destination == finalIndex[session.id] {
@@ -330,8 +387,13 @@ struct SessionTransferService: Sendable {
                           ) else { continue }
                     retained[item.session.id] = entry
                 }
-                comparisonCache.sources[comparisonKey] = retained
-                try comparisonCache.save(in: destination)
+                for session in sessions where retained[session.id]?.issue == nil {
+                    retained[session.id]?.reconciledParent = reconciledParents[session.id]
+                }
+                if retained != entries {
+                    comparisonCache.sources[comparisonKey] = retained
+                    try comparisonCache.save(in: destination)
+                }
             } catch {
                 onSyncIssue("Could not save the comparison cache: \(error.localizedDescription)")
             }
@@ -340,7 +402,8 @@ struct SessionTransferService: Sendable {
         return SessionTransferResult(
             sessionCount: selected.count + cached.count,
             copiedCount: indexedSessions.count { requestedIDs.contains($0.id) },
-            pickerImportsCount: pickerImportsCount
+            pickerImportsCount: pickerImportsCount,
+            reconciledCount: reconciledCount
         )
     }
 }
@@ -350,11 +413,13 @@ extension SessionTransferService {
         let id: String
         let rolloutPath: String
         let name: String?
+        var activityMilliseconds: Int64? = nil
 
         enum CodingKeys: String, CodingKey {
             case id
             case rolloutPath = "rollout_path"
             case name
+            case activityMilliseconds
         }
     }
 
@@ -406,7 +471,13 @@ extension SessionTransferService {
             do {
                 let resolved = try resolveDetachedMetadataRollout(session)
                 guard let baseline = imports[session.id] else { return resolved }
-                let data = try Data(contentsOf: URL(fileURLWithPath: resolved.rolloutPath))
+                let url = URL(fileURLWithPath: resolved.rolloutPath)
+                if let activity = session.activityMilliseconds, activity <= baseline,
+                   let modified = try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                   Int64((modified.timeIntervalSince1970 * 1_000).rounded()) <= baseline {
+                    return nil
+                }
+                let data = try Data(contentsOf: url)
                 guard let date = try latestUserRequest(in: data),
                       Int64((date.timeIntervalSince1970 * 1_000).rounded()) > baseline else { return nil }
                 return resolved
@@ -424,7 +495,8 @@ extension SessionTransferService {
         limit: String = ""
     ) throws -> [SessionRecord] {
         let query = """
-            SELECT id, rollout_path, name
+            SELECT id, rollout_path, name,
+                   COALESCE(NULLIF(recency_at_ms, 0), updated_at_ms, updated_at * 1000) AS activityMilliseconds
             FROM threads
             WHERE archived = 0
               AND (preview <> '' OR first_user_message <> '' OR has_user_event = 1)
@@ -468,6 +540,7 @@ extension SessionTransferService {
 
     static func sameHistoryWithLocalSettings(_ source: Data, _ destination: Data) -> Bool {
         guard source.count == destination.count else { return false }
+        if source == destination { return true }
         let sourceLines = source.split(separator: 0x0A, omittingEmptySubsequences: false)
         let destinationLines = destination.split(separator: 0x0A, omittingEmptySubsequences: false)
         guard sourceLines.count == destinationLines.count else { return false }
@@ -476,6 +549,59 @@ extension SessionTransferService {
             sourceLine == destinationLine || (sourceLine.count == destinationLine.count
                 && isLocalSettingsRecord(sourceLine) && isLocalSettingsRecord(destinationLine))
         }
+    }
+
+    static func fastForwardedHistory(
+        parent: Data, base: Data, branch: Data, parentID: String, branchID: String, baseline: Int64
+    ) throws -> Data? {
+        guard branch.last == 0x0A,
+              let header = branch.firstIndex(of: 0x0A),
+              let record = try JSONSerialization.jsonObject(with: branch.prefix(upTo: header)) as? [String: Any],
+              record["type"] as? String == "session_meta",
+              let metadata = record["payload"] as? [String: Any],
+              metadata["id"] as? String == branchID,
+              metadata["forked_from_id"] as? String == parentID,
+              let ordinal = metadata["forked_from_ordinal_exclusive"] as? Int,
+              ordinal > 0 else { return nil }
+        // The fork ordinal counts rollout records, including session metadata.
+        func boundary(in data: Data) -> Data.Index? {
+            var start = data.startIndex
+            for _ in 0..<ordinal {
+                guard let newline = data[start...].firstIndex(of: 0x0A) else { return nil }
+                start = data.index(after: newline)
+            }
+            return start
+        }
+        guard let baseEnd = boundary(in: base), let parentEnd = boundary(in: parent),
+              sameHistoryWithLocalSettings(Data(base.prefix(upTo: baseEnd)), Data(parent.prefix(upTo: parentEnd))) else {
+            return nil
+        }
+        if let reference = metadata["history_base"], !(reference is NSNull) {
+            guard let segment = reference as? [String: Any],
+                  segment["thread_id"] as? String == parentID,
+                  segment["end_ordinal_exclusive"] as? Int == ordinal,
+                  segment["end_byte_offset"] as? Int == baseEnd else { return nil }
+        }
+        let suffix = Data(branch.suffix(from: branch.index(after: header)))
+        guard let activity = try latestUserRequest(in: suffix),
+              Int64((activity.timeIntervalSince1970 * 1_000).rounded()) > baseline else { return nil }
+        let existing = Data(parent.suffix(from: parentEnd))
+        if existing.starts(with: suffix) { return parent }
+        let appendFrom: Data.Index
+        if suffix.starts(with: existing) {
+            appendFrom = existing.count
+        } else {
+            let currentRecords = existing.split(separator: 0x0A).filter { !isLocalSettingsRecord($0) }
+            let branchRecords = suffix.split(separator: 0x0A).filter { !isLocalSettingsRecord($0) }
+            if currentRecords.starts(with: branchRecords) { return parent }
+            guard branchRecords.starts(with: currentRecords) else {
+                throw SessionTransferError.divergentHistory(parentID)
+            }
+            appendFrom = branchRecords.prefix(currentRecords.count).last.map { $0.endIndex + 1 } ?? suffix.startIndex
+        }
+        let updated = parent + suffix.suffix(from: appendFrom)
+        try validateRollout(updated, threadID: parentID)
+        return updated
     }
 
     private static func isLocalSettingsRecord(_ line: Data.SubSequence) -> Bool {
@@ -636,41 +762,69 @@ extension SessionTransferService {
         }
     }
 
-    private static func cacheIndexedRollouts(in profile: CodexProfile) throws -> [String: SyncComparisonCache.IndexedRollout] {
+    private struct SyncIndex {
+        var records: [String: SessionRecord] = [:]
+        var rollouts: [String: SyncComparisonCache.IndexedRollout] = [:]
+        var visibleIDs: Set<String> = []
+    }
+
+    private static func syncIndex(in profile: CodexProfile) throws -> SyncIndex {
         let database = profile.homeURL.appending(path: "state_5.sqlite")
-        guard FileManager.default.fileExists(atPath: database.path) else { return [:] }
+        guard FileManager.default.fileExists(atPath: database.path) else { return SyncIndex() }
         struct Row: Decodable {
             let id: String
             let path: String
+            let name: String?
             let updated: Int64
             let recency: Int64
+            let visible: Int
+            let archived: Int
         }
         let data = try SQLiteQueryRunner.query(
             databaseURL: database,
             sql: """
-                SELECT id, rollout_path AS path, COALESCE(updated_at_ms, updated_at * 1000) AS updated,
-                       recency_at_ms AS recency
-                FROM threads WHERE archived = 0 AND preview <> '';
+                SELECT id, rollout_path AS path, name, COALESCE(updated_at_ms, updated_at * 1000) AS updated,
+                       recency_at_ms AS recency, (preview <> '') AS visible, archived
+                FROM threads;
                 """,
             outputJSON: true
         )
         let rows = try JSONDecoder().decode([Row].self, from: data)
-        return Dictionary(uniqueKeysWithValues: rows.map {
-            ($0.id, SyncComparisonCache.IndexedRollout(path: $0.path, updated: $0.updated, recency: $0.recency))
-        })
+        var index = SyncIndex()
+        for row in rows {
+            index.records[row.id] = SessionRecord(id: row.id, rolloutPath: row.path, name: row.name)
+            if row.visible != 0 {
+                index.visibleIDs.insert(row.id)
+                if row.archived == 0 {
+                    index.rollouts[row.id] = SyncComparisonCache.IndexedRollout(
+                        path: row.path, updated: row.updated, recency: row.recency
+                    )
+                }
+            }
+        }
+        return index
     }
 
     private static func segmentIdentifier(for path: String) -> String {
         String(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent.suffix(36))
     }
 
-    private static func cacheSegmentPaths(_ ids: Set<String>, in profile: CodexProfile) throws -> [String: [String]] {
-        var paths: [String: [String]] = [:]
-        for url in try sourceRolloutURLs(in: profile) {
-            let id = segmentIdentifier(for: url.path)
-            if ids.contains(id) { paths[id, default: []].append(url.path) }
+    final class RolloutInventory {
+        private var pathsBySegment: [String: [String]]?
+        private var allPaths: [String] = []
+
+        func paths(in profile: CodexProfile) throws -> [String: [String]] {
+            if let pathsBySegment { return pathsBySegment }
+            allPaths = try sourceRolloutURLs(in: profile).map(\.path)
+            let paths = Dictionary(grouping: allPaths, by: segmentIdentifier)
+            pathsBySegment = paths
+            return paths
         }
-        return paths
+
+        func candidates(for identifier: String, in profile: CodexProfile) throws -> [String] {
+            let indexed = try paths(in: profile)
+            return identifier.count == 36 ? indexed[identifier, default: []] : allPaths
+        }
     }
 
     private static func cacheEntry(
@@ -717,31 +871,28 @@ extension SessionTransferService {
         to destination: CodexProfile,
         validate: (inout PreparedTransfer) throws -> Void = { _ in },
         onSkippedSession: ((String) -> Void)? = nil,
-        captureStamps: Bool = false
+        captureStamps: Bool = false,
+        rolloutInventory: RolloutInventory = RolloutInventory()
     ) throws -> [PreparedTransfer] {
         let recordsByID = Dictionary((available + selected).map { ($0.id, $0) }) { _, selected in selected }
         var preparedByPath: [String: PreparedTransfer] = [:]
         var visiting: Set<String> = []
         var ordered: [PreparedTransfer] = []
 
-        var rolloutURLs: [URL]?
-
         func historySegment(_ identifier: String, for session: SessionRecord) throws -> SessionRecord {
-            if rolloutURLs == nil {
-                rolloutURLs = try sourceRolloutURLs(in: source)
-            }
-            let matches = (rolloutURLs ?? []).filter {
-                let name = $0.lastPathComponent
+            let matches = try rolloutInventory.candidates(for: identifier, in: source).filter {
+                let name = URL(fileURLWithPath: $0).lastPathComponent
                 return name.hasSuffix("-\(identifier).jsonl") || name.hasSuffix("_\(identifier).jsonl")
             }
             guard matches.count <= 1 else {
                 throw SessionTransferError.ambiguousLineageSource(identifier)
             }
-            guard let url = matches.first else {
+            guard let path = matches.first else {
                 throw SessionTransferError.missingLineageSource(
                     threadID: session.id, sourceThreadID: identifier
                 )
             }
+            let url = URL(fileURLWithPath: path)
             let data = try Data(contentsOf: url)
             guard let firstLine = data.split(separator: 0x0A).first,
                   let object = try JSONSerialization.jsonObject(with: Data(firstLine)) as? [String: Any],
@@ -1048,28 +1199,88 @@ extension SessionTransferService {
 }
 
 private extension SessionTransferService {
+    final class PickerConnection {
+        var rpc: AppServerRPC?
+
+        deinit { rpc?.close() }
+
+        func reset() {
+            rpc?.close()
+            rpc = nil
+        }
+    }
+
+    func pickerRPC(in profile: CodexProfile, connection: PickerConnection) throws -> AppServerRPC {
+        if let rpc = connection.rpc { return rpc }
+        let rpc = try AppServerRPC(executableURL: codexExecutableURL, profileHomeURL: profile.homeURL, timeout: timeout)
+        do {
+            try initialize(rpc)
+        } catch {
+            rpc.close()
+            throw error
+        }
+        connection.rpc = rpc
+        return rpc
+    }
+
+    func fastForwardParent(
+        _ parent: SessionRecord,
+        base: SessionRecord,
+        from continuation: SessionRecord,
+        imported: PickerImport,
+        indexed: SyncComparisonCache.IndexedRollout?,
+        in profile: CodexProfile
+    ) throws -> (matched: Bool, updated: Bool) {
+        let url = URL(fileURLWithPath: parent.rolloutPath).resolvingSymlinksInPath()
+        guard url.path.hasPrefix(profile.homeURL.resolvingSymlinksInPath().path + "/") else {
+            throw SessionTransferError.rolloutOutsideProfile(threadID: parent.id, path: url.path)
+        }
+        let current = try Data(contentsOf: url)
+        let branch = try Data(contentsOf: URL(fileURLWithPath: continuation.rolloutPath))
+        let baseline = try Data(contentsOf: URL(fileURLWithPath: base.rolloutPath))
+        guard let updated = try Self.fastForwardedHistory(parent: current, base: baseline, branch: branch,
+                                                         parentID: parent.id, branchID: continuation.id,
+                                                         baseline: imported.activityMilliseconds) else { return (false, false) }
+        if updated != current {
+            _ = try Self.commit([PreparedTransfer(
+                session: parent, sourceData: updated, destinationURL: url, disposition: .replace,
+                sourceThreadID: nil, destinationData: current
+            )])
+        }
+        let needsIndex = updated != current || (indexed?.recency ?? 0) < (continuation.activityMilliseconds ?? 0)
+        if needsIndex {
+            let indexedSessions = try index(sessions: [parent], in: profile, onIssue: nil)
+            try Self.restoreIndexedRecency(for: indexedSessions, in: profile)
+        }
+        return (true, needsIndex)
+    }
+
     func ensurePickerVisibility(
         for sessions: [SessionRecord],
         in profile: CodexProfile,
+        picker: PickerConnection,
+        parentAlternatives: [String: String],
         onIssue: ((String) -> Void)?
     ) throws -> Int {
         guard !sessions.isEmpty else { return 0 }
-        let rpc = try AppServerRPC(executableURL: codexExecutableURL, profileHomeURL: profile.homeURL, timeout: timeout)
-        defer { rpc.close() }
-        try initialize(rpc)
+        let rpc = try pickerRPC(in: profile, connection: picker)
         var imports = try Self.pickerImports(in: profile)
-        let accountVisible = try pickerVisibleIDs(sessions.map(\.id) + imports.map(\.forkID), with: rpc)
-        let missing = sessions.filter { !accountVisible.contains($0.id) }
+        let candidates = Set(sessions.map(\.id) + imports.map(\.forkID) + parentAlternatives.values)
+        let accountVisible = try pickerVisibleIDs(candidates.sorted(), with: rpc)
+        let missing = sessions.filter { session in
+            !accountVisible.contains(session.id) && parentAlternatives[session.id].map(accountVisible.contains) != true
+        }
         guard !missing.isEmpty else { return 0 }
-        let generallyVisible = try pickerVisibleIDs(missing.map(\.id), with: rpc, currentAccountOnly: false)
-
         struct IndexedActivity: Decodable {
             let id: String
             let activity: Int64
             let cwd: String
         }
         let database = profile.homeURL.appending(path: "state_5.sqlite")
-        let ids = missing.map { "'\(Self.sqlString($0.id))'" }.joined(separator: ",")
+        let missingIDs = Set(missing.map(\.id))
+        let relevantForks = imports.filter { missingIDs.contains($0.sourceID) && accountVisible.contains($0.forkID) }
+        let ids = (missing.map(\.id) + relevantForks.map(\.forkID))
+            .map { "'\(Self.sqlString($0))'" }.joined(separator: ",")
         let data = try SQLiteQueryRunner.query(
             databaseURL: database,
             sql: """
@@ -1081,7 +1292,16 @@ private extension SessionTransferService {
         let activities = try JSONDecoder().decode([IndexedActivity].self, from: data)
         let activityByID = Dictionary(uniqueKeysWithValues: activities.map { ($0.id, $0) })
         var imported = 0
-        for session in missing {
+        let reusable = Set(relevantForks.compactMap { item -> String? in
+            guard activityByID[item.sourceID]?.activity == item.activityMilliseconds,
+                  let fork = activityByID[item.forkID],
+                  fork.activity == item.activityMilliseconds
+                    || (item.recencyRestored == true && fork.activity > item.activityMilliseconds) else { return nil }
+            return item.sourceID
+        })
+        let unresolved = missing.filter { !reusable.contains($0.id) }
+        let generallyVisible = try pickerVisibleIDs(unresolved.map(\.id), with: rpc, currentAccountOnly: false)
+        for session in unresolved {
             do {
                 guard generallyVisible.contains(session.id) else {
                     throw SessionTransferError.appServerFailed("Conversation \(session.id) is ineligible for /resume.")
@@ -1111,14 +1331,18 @@ private extension SessionTransferService {
                     imports.append(PickerImport(sourceID: session.id, forkID: forkID, activityMilliseconds: activity))
                     let checkpoint = try JSONEncoder().encode(imports)
                     try checkpoint.write(to: Self.pickerImportURL(in: profile), options: .atomic)
-                    if let name = session.name, !name.isEmpty {
-                        _ = try rpc.call(method: "thread/name/set", params: ["threadId": forkID, "name": name])
-                    }
+                }
+                if let name = session.name, !name.isEmpty {
+                    _ = try rpc.call(method: "thread/name/set", params: ["threadId": forkID, "name": name])
                 }
                 let fork = SessionRecord(id: forkID, rolloutPath: "", name: session.name)
                 try Self.restoreIndexedRecency(for: [fork], in: profile, inheritedActivity: [forkID: activity])
                 guard try pickerVisibleIDs([forkID], with: rpc).contains(forkID) else {
                     throw SessionTransferError.appServerFailed("Conversation \(forkID) is missing from this account's /resume list.")
+                }
+                if let index = imports.lastIndex(where: { $0.forkID == forkID }) {
+                    imports[index].recencyRestored = true
+                    try JSONEncoder().encode(imports).write(to: Self.pickerImportURL(in: profile), options: .atomic)
                 }
                 if created { imported += 1 }
             } catch {
