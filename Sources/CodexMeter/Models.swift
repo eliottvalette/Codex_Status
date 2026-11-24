@@ -1,9 +1,47 @@
 import Foundation
 
+enum ProfileProvider: String, Hashable, Sendable {
+    case codex
+    case claude
+
+    var displayName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
+}
+
 struct CodexProfile: Identifiable, Hashable, Sendable {
     let id: String
     let displayName: String
     let homeURL: URL
+    let provider: ProfileProvider
+
+    init(id: String, displayName: String, homeURL: URL, provider: ProfileProvider = .codex) {
+        self.id = id
+        self.displayName = displayName
+        self.homeURL = homeURL
+        self.provider = provider
+    }
+
+    /// The same profile under another name, as shown in the app.
+    func named(_ displayName: String) -> CodexProfile {
+        CodexProfile(id: id, displayName: displayName, homeURL: homeURL, provider: provider)
+    }
+
+    /// The profiles the app tracks: the compiled Codex list, then every Claude Code profile
+    /// found under the home directory. When Claude profiles exist and none of the Codex
+    /// directories do, the Codex list is left out.
+    static func launchProfiles(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        codex: [CodexProfile] = configured
+    ) -> [CodexProfile] {
+        let claude = ClaudeProfiles.discover(home: home)
+        guard claude.isEmpty == false else { return codex }
+        let hasCodexHome = codex.contains { FileManager.default.fileExists(atPath: $0.homeURL.path) }
+        return (hasCodexHome ? codex : []) + claude
+    }
 
     static let configured: [CodexProfile] = {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -61,10 +99,22 @@ enum WindowClassifier {
     }
 }
 
+/// A weekly limit that applies to one model only, such as Claude's "Weekly · Fable".
+struct ModelQuotaWindow: Equatable, Sendable {
+    let name: String
+    let window: QuotaWindow
+
+    /// Short enough to sit above a ring.
+    var label: String {
+        String(name.uppercased().prefix(7)).trimmingCharacters(in: .whitespaces)
+    }
+}
+
 struct QuotaSnapshot: Equatable, Sendable {
     let planType: String?
     let shortWindow: QuotaWindow?
     let weeklyWindow: QuotaWindow?
+    let modelWindows: [ModelQuotaWindow]
     let availableResetCredits: Int?
     let earliestResetCreditExpiresAt: Date?
     let fetchedAt: Date
@@ -73,6 +123,7 @@ struct QuotaSnapshot: Equatable, Sendable {
         planType: String?,
         shortWindow: QuotaWindow?,
         weeklyWindow: QuotaWindow?,
+        modelWindows: [ModelQuotaWindow] = [],
         availableResetCredits: Int? = nil,
         earliestResetCreditExpiresAt: Date? = nil,
         fetchedAt: Date
@@ -80,15 +131,40 @@ struct QuotaSnapshot: Equatable, Sendable {
         self.planType = planType
         self.shortWindow = shortWindow
         self.weeklyWindow = weeklyWindow
+        self.modelWindows = modelWindows
         self.availableResetCredits = availableResetCredits
         self.earliestResetCreditExpiresAt = earliestResetCreditExpiresAt
         self.fetchedAt = fetchedAt
     }
+
+    /// The per-model window with the least left, among those in use.
+    var tightestModelWindow: ModelQuotaWindow? {
+        modelWindows
+            .filter { $0.window.state != .dormant }
+            .min(by: { $0.window.remainingPercent < $1.window.remainingPercent })
+    }
+
+    /// Every window that limits the account, single-model ones included.
+    var allWindows: [QuotaWindow] {
+        [shortWindow, weeklyWindow].compactMap { $0 } + modelWindows.map(\.window)
+    }
+}
+
+/// Who a Claude profile is signed in as, from `claude auth status`.
+enum AccountSignIn: Equatable, Sendable {
+    case signedIn(email: String?)
+    case signedOut
+
+    var email: String? {
+        if case let .signedIn(email) = self { return email }
+        return nil
+    }
 }
 
 struct ProfileStatus: Identifiable, Sendable {
-    let profile: CodexProfile
+    var profile: CodexProfile
     var snapshot: QuotaSnapshot?
+    var signIn: AccountSignIn?
     var errorMessage: String?
     var lastActivity: Date?
     var activityErrorMessage: String?
@@ -130,6 +206,26 @@ struct ProfileStatus: Identifiable, Sendable {
             return "\(profile.displayName) - \(availableCredits) - \(days)d"
         }
         return "\(profile.displayName) - \(availableCredits)"
+    }
+}
+
+struct LowestRemainingQuota: Equatable, Sendable {
+    let provider: ProfileProvider
+    let percent: Int
+
+    /// The tightest quota window across all profiles, with the provider it belongs to.
+    static func find(in statuses: [ProfileStatus]) -> LowestRemainingQuota? {
+        statuses
+            .flatMap { status -> [LowestRemainingQuota] in
+                guard let snapshot = status.snapshot else { return [] }
+                return snapshot.allWindows.map {
+                    LowestRemainingQuota(
+                        provider: status.profile.provider,
+                        percent: Int($0.remainingPercent.rounded())
+                    )
+                }
+            }
+            .min(by: { $0.percent < $1.percent })
     }
 }
 

@@ -1,31 +1,333 @@
 import AppKit
 import SwiftUI
 
+/// In the macOS 27 SDK `@State` is also a macro, and its plugin ships with Xcode but not with
+/// the Command Line Tools. The property wrapper under another name builds with both.
+private typealias ViewState = SwiftUI.State
+
 // MARK: - Root
+
+private enum DashboardLayout {
+    static let quadrantHeight: CGFloat = 198
+    static let codexGridHeight: CGFloat = 2 * quadrantHeight
+}
 
 struct DashboardView: View {
     let store: UsageStore
 
+    private var codexStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .codex }
+    }
+
+    private var claudeStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .claude }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            QuadrantGrid(
-                statuses: store.statuses,
-                mostRecentID: store.mostRecentProfileID,
-                onProfileRightClick: { profileID in
-                    Task { await store.handleProfileTap(profileID) }
-                },
-                onProfileLeftClick: {
-                    if store.transferSourceID != nil {
-                        store.cancelTransferSelection()
-                    }
-                }
-            )
+            if codexStatuses.isEmpty == false {
+                QuadrantGrid(
+                    statuses: codexStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onProfileRightClick: selectForCopy,
+                    onProfileLeftClick: cancelCopySelection
+                )
+                .frame(height: DashboardLayout.codexGridHeight)
+            }
+            if codexStatuses.isEmpty == false && claudeStatuses.isEmpty == false {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+            }
+            if claudeStatuses.isEmpty == false {
+                ProfileRows(
+                    statuses: claudeStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onReconnect: { profileID in
+                        Task { await store.reconnect(profileID) }
+                    },
+                    onRename: { profileID, name in
+                        store.renameAccount(profileID, to: name)
+                    },
+                    onProfileRightClick: selectForCopy,
+                    onProfileLeftClick: cancelCopySelection
+                )
+            }
+            if store.showsRecentChats {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+                RecentChatsSection(store: store)
+            }
             ControlRow(store: store)
         }
-        .frame(width: 640, height: 420)
+        .frame(width: 640)
         .onExitCommand {
             store.cancelTransferSelection()
         }
+    }
+
+    private func selectForCopy(_ profileID: String) {
+        Task { await store.handleProfileTap(profileID) }
+    }
+
+    private func cancelCopySelection() {
+        if store.transferSourceID != nil {
+            store.cancelTransferSelection()
+        }
+    }
+}
+
+// MARK: - Claude rows
+
+/// The number of Claude profiles varies, so they are laid out two to a row below the
+/// fixed Codex grid.
+private struct ProfileRows: View {
+    let statuses: [ProfileStatus]
+    let mostRecentID: String?
+    let onReconnect: (String) -> Void
+    let onRename: (String, String) -> Void
+    let onProfileRightClick: (String) -> Void
+    let onProfileLeftClick: () -> Void
+
+    private var rows: [[ProfileStatus]] {
+        stride(from: 0, to: statuses.count, by: 2).map { start in
+            Array(statuses[start..<min(start + 2, statuses.count)])
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(height: 1)
+                }
+                HStack(spacing: 0) {
+                    quadrant(row[0])
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1)
+                    if row.count > 1 {
+                        quadrant(row[1])
+                    } else {
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: DashboardLayout.quadrantHeight)
+            }
+        }
+    }
+
+    private func quadrant(_ status: ProfileStatus) -> some View {
+        AliasQuadrant(
+            status: status,
+            isMostRecent: status.id == mostRecentID,
+            onRightClick: onProfileRightClick,
+            onLeftClick: onProfileLeftClick,
+            onReconnect: onReconnect,
+            onRename: onRename
+        )
+        .id(status.id)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Recent Claude chats
+
+/// The newest conversations across Claude accounts, each with a one-click copy to the
+/// other accounts. The right-click copy of the three newest still works.
+private struct RecentChatsSection: View {
+    let store: UsageStore
+    @ViewState private var renamingID: String?
+    @ViewState private var draftTitle = ""
+    @ViewState private var showsAll = false
+    @FocusState private var isEditingTitle: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("RECENT CHATS")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .tracking(1)
+
+            if let move = store.chatMove {
+                suggestion(move)
+            }
+
+            if store.recentChats.isEmpty {
+                Text("No Claude conversations yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    if showsAll {
+                        ScrollView {
+                            rows(store.recentChats, now: context.date)
+                        }
+                        .frame(maxHeight: 300)
+                    } else {
+                        rows(store.recentChats.prefix(RecentClaudeChat.pageSize), now: context.date)
+                    }
+                }
+                if store.recentChats.count > RecentClaudeChat.pageSize {
+                    Button(showsAll ? "See less" : "See more") { showsAll.toggle() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func rows(_ chats: some RandomAccessCollection<RecentClaudeChat>, now: Date) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
+            ForEach(Array(chats)) { chat in
+                row(chat, now: now)
+            }
+        }
+    }
+
+    private func row(_ chat: RecentClaudeChat, now: Date) -> some View {
+        GridRow {
+            Text(displayName(chat.profileID))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Text(RecentClaudeChat.ageLabel(since: chat.lastMessageAt, relativeTo: now))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+
+            title(chat)
+
+            Text(chat.folderName)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 110, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Button {
+                    store.copyResumeCommand(for: chat)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Copy the command that resumes this conversation")
+
+                copyControl(chat)
+            }
+        }
+        .help(tooltip(chat))
+    }
+
+    /// The pen button renames the conversation; Return saves, Escape cancels.
+    @ViewBuilder
+    private func title(_ chat: RecentClaudeChat) -> some View {
+        if renamingID == chat.id {
+            TextField("Title", text: $draftTitle)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .focused($isEditingTitle)
+                .background(TakesKeyboard())
+                .onAppear { isEditingTitle = true }
+                .onSubmit {
+                    renamingID = nil
+                    let title = draftTitle
+                    Task { await store.renameChat(chat, to: title) }
+                }
+                .onExitCommand { renamingID = nil }
+                .onChange(of: isEditingTitle) { _, isFocused in
+                    if isFocused == false { renamingID = nil }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            HStack(spacing: 4) {
+                Text(chat.title)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Button {
+                    draftTitle = chat.title
+                    renamingID = chat.id
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Rename this conversation")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func suggestion(_ move: ChatMove) -> some View {
+        let label = move.chats.count == 1 ? "chat" : "chats"
+        return HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("\(move.source.displayName) has \(move.sourceRoom)% left. Move \(move.chats.count) \(label) to \(move.destination.displayName)?")
+                .lineLimit(1)
+            Button("Move") {
+                Task { await store.moveChats(move) }
+            }
+            .buttonStyle(.borderless)
+            .disabled(store.isTransferring)
+        }
+        .font(.system(size: 11))
+    }
+
+    @ViewBuilder
+    private func copyControl(_ chat: RecentClaudeChat) -> some View {
+        let destinations = store.claudeProfiles.filter { $0.id != chat.profileID }
+        if destinations.count == 1, let destination = destinations.first {
+            if chat.copiedToProfileIDs.contains(destination.id) {
+                Text("✓ \(destination.displayName)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .help("Already copied to \(destination.displayName)")
+            } else {
+                Button("→ \(destination.displayName)") {
+                    Task { await store.copyChat(chat, to: destination.id) }
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .buttonStyle(.borderless)
+                .disabled(store.isTransferring)
+                .help("Copy this conversation to \(destination.displayName)")
+            }
+        } else {
+            Menu("Copy to…") {
+                ForEach(destinations) { destination in
+                    let isCopied = chat.copiedToProfileIDs.contains(destination.id)
+                    Button(isCopied ? "✓ \(destination.displayName)" : destination.displayName) {
+                        Task { await store.copyChat(chat, to: destination.id) }
+                    }
+                    .disabled(isCopied)
+                }
+            }
+            .font(.system(size: 11))
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(store.isTransferring)
+        }
+    }
+
+    private func displayName(_ profileID: String) -> String {
+        store.claudeProfiles.first(where: { $0.id == profileID })?.displayName ?? profileID
+    }
+
+    private func tooltip(_ chat: RecentClaudeChat) -> String {
+        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)"]
+            .compactMap { $0 }
+            .joined(separator: "\n")
     }
 }
 
@@ -92,6 +394,18 @@ private struct AliasQuadrant: View {
     let isMostRecent: Bool
     let onRightClick: (String) -> Void
     let onLeftClick: () -> Void
+    /// Claude accounts only: reads a disconnected account again.
+    var onReconnect: ((String) -> Void)? = nil
+    /// Claude accounts only: names the account in the app.
+    var onRename: ((String, String) -> Void)? = nil
+
+    @ViewState private var isRenaming = false
+    @ViewState private var draftName = ""
+    @FocusState private var isEditingName: Bool
+
+    private var isDisconnected: Bool {
+        status.errorMessage != nil || status.signIn == .signedOut
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -106,18 +420,98 @@ private struct AliasQuadrant: View {
                 profileID: status.id,
                 isEnabled: status.errorMessage == nil || status.snapshot != nil,
                 onRightClick: onRightClick,
-                onLeftClick: onLeftClick
+                onLeftClick: onLeftClick,
+                toolTip: status.errorMessage
             )
         }
+        // The click overlay takes every click under it, so the header's buttons sit above it.
+        .overlay(alignment: .top) {
+            if onRename != nil || onReconnect != nil {
+                headerControls
+            }
+        }
+    }
+
+    /// The header's buttons, in a copy of the header whose labels are invisible, so the
+    /// pen lands right after the name. Invisible labels let clicks through to the overlay.
+    private var headerControls: some View {
+        HStack(spacing: 4) {
+            if isRenaming {
+                TextField("Name", text: $draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .frame(maxWidth: 180)
+                    .focused($isEditingName)
+                    .background(TakesKeyboard())
+                    .onAppear { isEditingName = true }
+                    .onSubmit {
+                        isRenaming = false
+                        onRename?(status.id, draftName)
+                    }
+                    .onExitCommand { isRenaming = false }
+                    .onChange(of: isEditingName) { _, isFocused in
+                        if isFocused == false { isRenaming = false }
+                    }
+            } else {
+                nameLabel.hidden()
+                if onRename != nil {
+                    Button {
+                        draftName = status.profile.displayName
+                        isRenaming = true
+                    } label: {
+                        penIcon
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Rename this account in the app")
+                }
+            }
+
+            Spacer()
+
+            if let onReconnect, isDisconnected, status.isRefreshing == false {
+                Button("Reconnect") { onReconnect(status.id) }
+                    .font(.system(size: 10))
+                    .buttonStyle(.borderless)
+                    .help("Read this account again. If it is still disconnected, opens Terminal in it to sign in again.")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+    }
+
+    private var nameLabel: some View {
+        Text(status.headerTitle())
+            .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
+            .foregroundStyle(isMostRecent ? .primary : .secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+    }
+
+    private var penIcon: some View {
+        Image(systemName: "pencil")
+            .font(.system(size: 10))
     }
 
     private var aliasHeader: some View {
         HStack(spacing: 4) {
-            Text(status.headerTitle())
-                .font(.system(size: 11, weight: isMostRecent ? .semibold : .regular, design: .monospaced))
-                .foregroundStyle(isMostRecent ? .primary : .secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            nameLabel
+            if onRename != nil {
+                // Room for the pen, which is drawn in the layer above.
+                penIcon.hidden()
+            }
+
+            if let email = status.signIn?.email {
+                Text(email)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if status.signIn == .signedOut {
+                Text("signed out")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
 
             if status.isStale {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -132,53 +526,78 @@ private struct AliasQuadrant: View {
                     .controlSize(.mini)
             }
         }
+        // While renaming, the field above takes the place of these labels.
+        .opacity(isRenaming ? 0 : 1)
     }
 
     @ViewBuilder
     private var gaugeRow: some View {
-        if status.errorMessage != nil, status.snapshot == nil {
+        if let message = status.errorMessage, status.snapshot == nil {
+            // No reading yet: a smaller ring leaves room to say why.
             GeometryReader { geo in
-                let diameter = max(50, min(78, min(geo.size.width / 2 - 12, geo.size.height - 44)))
-                QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityLabel("Account unavailable")
+                let diameter = max(50, min(64, min(geo.size.width / 2 - 12, geo.size.height - 84)))
+                VStack(spacing: 4) {
+                    QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
+                        .accessibilityLabel("Account unavailable")
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
+        } else if gauges.count == 1 {
             // Profile has no 5H quota — ring fills available space
             GeometryReader { geo in
                 let diameter = max(50, min(84, min(geo.size.width - 16, geo.size.height - 44)))
                 QuotaGauge(
-                    label: "WEEK",
-                    window: status.snapshot?.weeklyWindow,
+                    label: gauges[0].label,
+                    window: gauges[0].window,
                     diameter: diameter
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             GeometryReader { geo in
-                let availableWidthPerGauge = geo.size.width / 2
+                let availableWidthPerGauge = geo.size.width / CGFloat(gauges.count)
                 let maxHorizontalDiameter = availableWidthPerGauge - 12
                 let maxVerticalDiameter = geo.size.height - 44
-                let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
+                // Three rings share the box, so each gets a little less room.
+                let maxDiameter: CGFloat = gauges.count > 2 ? 70 : 78
+                let diameter = max(50, min(maxDiameter, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
                 HStack(spacing: 0) {
-                    QuotaGauge(
-                        label: "5H",
-                        window: status.snapshot?.shortWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    QuotaGauge(
-                        label: "WEEK",
-                        window: status.snapshot?.weeklyWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ForEach(Array(gauges.enumerated()), id: \.offset) { _, gauge in
+                        QuotaGauge(
+                            label: gauge.label,
+                            window: gauge.window,
+                            diameter: diameter
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    /// 5H when the plan has one, WEEK, then the tightest single-model weekly limit when
+    /// one is in use. Codex accounts report no model limits, so they show one or two rings.
+    private var gauges: [(label: String, window: QuotaWindow?)] {
+        guard let snapshot = status.snapshot else {
+            return [("5H", nil), ("WEEK", nil)]
+        }
+        var gauges: [(label: String, window: QuotaWindow?)] = []
+        if let shortWindow = snapshot.shortWindow {
+            gauges.append(("5H", shortWindow))
+        }
+        gauges.append(("WEEK", snapshot.weeklyWindow))
+        if let model = snapshot.tightestModelWindow {
+            gauges.append((model.label, model.window))
+        }
+        return gauges
     }
 }
 
@@ -187,6 +606,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
     let isEnabled: Bool
     let onRightClick: (String) -> Void
     let onLeftClick: () -> Void
+    var toolTip: String? = nil
 
     func makeNSView(context: Context) -> ProfileClickView {
         ProfileClickView()
@@ -197,6 +617,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
             if isEnabled { onRightClick(profileID) }
         }
         nsView.onLeftClick = onLeftClick
+        nsView.toolTip = toolTip
     }
 
     final class ProfileClickView: NSView {
@@ -237,11 +658,13 @@ private struct QuotaGauge: View {
     }
 
     private func resetFraction(relativeTo now: Date) -> Double {
-        guard let window, let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
-            return 0
-        }
+        guard let window else { return 0 }
+        // An idle Claude window has no reset time yet, so check for idle first.
         if window.state == .dormant {
             return 1.0
+        }
+        guard let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
+            return 0
         }
         let windowSeconds = Double(durationMinutes) * 60
         let timeLeft = max(0, resetsAt.timeIntervalSince(now))
@@ -357,7 +780,118 @@ private struct QuotaGauge: View {
     }
 }
 
+// MARK: - Text fields in the panel
+
+/// Makes the menu bar panel take the keyboard, so typing reaches the text field it sits
+/// behind. The app runs in the background, and its panel does not take the keyboard on its own.
+private struct TakesKeyboard: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            NSApp.activate()
+            view.window?.makeKey()
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 // MARK: - Control row
+
+/// Creates a Claude account and opens Terminal in it to sign in.
+private struct AddAccountButton: View {
+    let store: UsageStore
+    @ViewState private var isAdding = false
+    @ViewState private var name = ""
+
+    private var accountName: String? {
+        ClaudeProfiles.accountName(name)
+    }
+
+    var body: some View {
+        Button {
+            isAdding = true
+        } label: {
+            Image(systemName: "plus")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Add a Claude account")
+        .popover(isPresented: $isAdding, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add a Claude account")
+                    .font(.headline)
+                TextField("Name, such as work", text: $name)
+                    .background(TakesKeyboard())
+                    .onSubmit(add)
+                Text("Creates ~/.claude-\(accountName ?? "name") and a claude-\(accountName ?? "name") alias, then opens Terminal so you can sign in.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { isAdding = false }
+                    Button("Add", action: add)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(accountName == nil)
+                }
+            }
+            .padding(12)
+            .frame(width: 260)
+        }
+    }
+
+    private func add() {
+        guard accountName != nil else { return }
+        let requested = name
+        name = ""
+        isAdding = false
+        Task { await store.addClaudeAccount(named: requested) }
+    }
+}
+
+private struct SettingsMenu: View {
+    @Bindable var settings: AppSettings
+    let store: UsageStore
+
+    init(store: UsageStore) {
+        self.store = store
+        settings = store.settings
+    }
+
+    var body: some View {
+        Menu {
+            Toggle("Start idle Claude windows", isOn: $settings.startsIdleClaudeWindows)
+            Picker("Refresh every", selection: $settings.refreshMinutes) {
+                ForEach(AppSettings.refreshChoices, id: \.self) { minutes in
+                    Text("\(minutes) min").tag(minutes)
+                }
+            }
+            Toggle("Notify when a limit is low", isOn: $settings.notifiesLowLimits)
+            Picker("Chats on a low Claude account", selection: $settings.chatMoves) {
+                ForEach(AppSettings.ChatMoves.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            Divider()
+            Toggle("Open at login", isOn: Binding(
+                get: { LoginItem.isEnabled },
+                set: { enabled in
+                    if let message = LoginItem.setEnabled(enabled) {
+                        store.report(message, style: .failure)
+                    }
+                }
+            ))
+        } label: {
+            Image(systemName: "gearshape")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Settings")
+    }
+}
 
 private struct ControlRow: View {
     let store: UsageStore
@@ -386,23 +920,29 @@ private struct ControlRow: View {
             if let transferStatus {
                 Text(transferStatus)
                     .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                     .help(store.transferFeedback?.detail ?? transferStatus)
             }
 
             Spacer()
 
-            Button {
-                Task { await store.syncRecentConversations() }
-            } label: {
-                Image(systemName: "arrow.left.arrow.right")
+            if store.canSyncConversations {
+                Button {
+                    Task { await store.syncRecentConversations() }
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                }
+                .disabled(store.isTransferring)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Sync Codex conversations from the last 10 days")
+                .help("Sync Codex conversations from the last 10 days")
             }
-            .disabled(store.isTransferring)
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Sync conversations from the last 10 days")
-            .help("Sync conversations from the last 10 days")
+
+            AddAccountButton(store: store)
+
+            SettingsMenu(store: store)
 
             Button {
                 Task { await store.refresh() }

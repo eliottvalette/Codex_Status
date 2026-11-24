@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+
+"""List and add the Claude Code accounts on this Mac.
+
+Each account is a configuration directory: ~/.claude, or ~/.claude-<name> opened with
+CLAUDE_CONFIG_DIR. Sign-in status comes from `claude auth status`; this command never
+reads stored credentials.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+MINIMUM_VERSION = (2, 1, 261)
+NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+# Where CodexMeter looks for Claude Code, in its order. `claude` on PATH comes last.
+CANDIDATES = ("~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "~/.claude/local/claude")
+USAGE = """usage: claude-accounts [list]
+       claude-accounts add NAME [--no-alias]
+
+  list        Show each Claude Code account, its alias, and who is signed in.
+  add NAME    Create ~/.claude-NAME and add a claude-NAME alias to your shell."""
+
+
+@dataclass(frozen=True)
+class Account:
+    alias: str
+    directory: Path
+
+    @property
+    def is_default(self) -> bool:
+        return self.alias == "claude"
+
+
+def accounts(home: Path) -> list[Account]:
+    """`~/.claude`, and each `~/.claude-*` folder that holds Claude Code data, as the app finds them."""
+    found = [
+        Account(directory.name.lstrip("."), directory)
+        for directory in home.glob(".claude*")
+        if directory.is_dir() and (
+            directory.name == ".claude"
+            or directory.name.startswith(".claude-")
+            and ((directory / "projects").is_dir() or (directory / ".claude.json").is_file())
+        )
+    ]
+    return sorted(found, key=lambda account: (not account.is_default, account.alias))
+
+
+def find_claude(home: Path) -> Path | None:
+    for candidate in CANDIDATES:
+        path = home / candidate[2:] if candidate.startswith("~/") else Path(candidate)
+        if os.access(path, os.X_OK):
+            return path
+    on_path = shutil.which("claude")
+    return Path(on_path) if on_path else None
+
+
+def environment(account: Account) -> dict[str, str]:
+    env = dict(os.environ)
+    # The default account signs in only while the variable is unset.
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if not account.is_default:
+        env["CLAUDE_CONFIG_DIR"] = str(account.directory)
+    for variable in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        env.pop(variable, None)
+    return env
+
+
+def sign_in(claude: Path, account: Account) -> str:
+    """Return who the account is signed in as, or why that is unknown."""
+    try:
+        completed = subprocess.run(
+            [str(claude), "auth", "status", "--json"],
+            env=environment(account), capture_output=True, text=True, timeout=20,
+            stdin=subprocess.DEVNULL,
+        )
+        status = json.loads(completed.stdout)
+    except subprocess.TimeoutExpired:
+        return "no answer from claude auth status"
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+    if not isinstance(status, dict) or not status.get("loggedIn"):
+        return "not signed in"
+    who = status.get("email") or "signed in"
+    method = status.get("authMethod")
+    return f"{who} ({method})" if method else str(who)
+
+
+def version(claude: Path) -> tuple[int, ...] | None:
+    try:
+        output = subprocess.run(
+            [str(claude), "--version"], capture_output=True, text=True, timeout=20,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", output)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def conversation_count(account: Account) -> int:
+    projects = account.directory / "projects"
+    if not projects.is_dir():
+        return 0
+    return sum(
+        1 for transcript in projects.glob("*/*.jsonl") if not transcript.name.startswith("agent-")
+    )
+
+
+def shell_file(home: Path) -> Path:
+    shell = os.environ.get("SHELL", "")
+    return home / (".bashrc" if shell.endswith("bash") else ".zshrc")
+
+
+def alias_line(name: str) -> str:
+    return f"alias claude-{name}='CLAUDE_CONFIG_DIR=\"$HOME/.claude-{name}\" claude'"
+
+
+def has_alias(home: Path, alias: str) -> bool:
+    pattern = re.compile(rf"^\s*alias\s+{re.escape(alias)}=", re.MULTILINE)
+    for name in (".zshrc", ".bashrc", ".bash_profile", ".zprofile"):
+        try:
+            if pattern.search((home / name).read_text(encoding="utf-8", errors="replace")):
+                return True
+        except FileNotFoundError:
+            continue
+    return False
+
+
+def list_accounts(home: Path) -> int:
+    claude = find_claude(home)
+    if claude is None:
+        print("Claude Code is not installed. See https://docs.claude.com/en/docs/claude-code/setup", file=sys.stderr)
+        return 1
+    found = version(claude)
+    label = ".".join(map(str, found)) if found else "unknown version"
+    note = "" if found is None or found >= MINIMUM_VERSION else "  (too old for CodexMeter: run `claude update`)"
+    print(f"Claude Code {label} at {claude}{note}")
+
+    found_accounts = accounts(home)
+    if not found_accounts:
+        print("No Claude Code accounts yet. Run `claude` once, or `claude-accounts add NAME`.")
+        return 0
+    rows = []
+    for account in found_accounts:
+        alias = account.alias if account.is_default or has_alias(home, account.alias) else "(no alias)"
+        rows.append((account.alias, alias, sign_in(claude, account), str(conversation_count(account))))
+    headers = ("ACCOUNT", "OPEN WITH", "SIGNED IN AS", "CHATS")
+    widths = [max(len(row[index]) for row in [headers, *rows]) for index in range(3)]
+    print()
+    for row in [headers, *rows]:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)) + "  " + row[3])
+    if any(row[1] == "(no alias)" for row in rows):
+        print("\nRun `claude-accounts add NAME` to add a missing alias.")
+    return 0
+
+
+def add_account(home: Path, name: str, write_alias: bool) -> int:
+    name = name.removeprefix("claude-")
+    if not NAME.match(name):
+        print("claude-accounts: use lowercase letters, digits and hyphens, such as `work`.", file=sys.stderr)
+        return 2
+    directory = home / f".claude-{name}"
+    created = not directory.exists()
+    directory.mkdir(mode=0o700, exist_ok=True)
+    print(f"{'Created' if created else 'Found'} {directory}")
+
+    alias = f"claude-{name}"
+    rc = shell_file(home)
+    if has_alias(home, alias):
+        print(f"The {alias} alias already exists.")
+    elif write_alias:
+        with rc.open("a", encoding="utf-8") as file:
+            file.write(f"\n# Claude Code account, added by claude-accounts\n{alias_line(name)}\n")
+        print(f"Added the {alias} alias to {rc}")
+    else:
+        print(f"Add this line to {rc}:\n  {alias_line(name)}")
+
+    print(
+        "\nNext:\n"
+        f"  1. source {rc}\n"
+        f"  2. {alias}, then sign in with /login\n"
+        "  3. Restart CodexMeter: it finds accounts when it starts."
+    )
+    return 0
+
+
+def main(arguments: list[str]) -> int:
+    home = Path.home()
+    if not arguments or arguments == ["list"]:
+        return list_accounts(home)
+    if arguments[0] == "add" and len(arguments) in (2, 3):
+        options = arguments[2:]
+        if options not in ([], ["--no-alias"]):
+            print(USAGE, file=sys.stderr)
+            return 2
+        return add_account(home, arguments[1], write_alias=not options)
+    if arguments[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except OSError as error:
+        print(f"claude-accounts: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
