@@ -623,16 +623,18 @@ private struct ControlRow: View {
 
             Spacer()
 
-            Button {
-                Task { await store.syncRecentConversations() }
-            } label: {
-                Image(systemName: "arrow.left.arrow.right")
+            if store.canSyncConversations {
+                Button {
+                    Task { await store.syncRecentConversations() }
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                }
+                .disabled(store.isTransferring)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Sync Codex conversations from the last 10 days")
+                .help("Sync Codex conversations from the last 10 days")
             }
-            .disabled(store.isTransferring)
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Sync conversations from the last 10 days")
-            .help("Sync conversations from the last 10 days")
 
             Button {
                 Task { await store.refresh() }

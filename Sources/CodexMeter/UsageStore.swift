@@ -59,15 +59,24 @@ final class UsageStore {
         transferDestinationID != nil || isSyncing
     }
 
+    var codexProfiles: [CodexProfile] {
+        statuses.map(\.profile).filter { $0.provider == .codex }
+    }
+
+    /// The sync reads and writes Codex rollouts, so it covers Codex accounts only.
+    var canSyncConversations: Bool {
+        codexProfiles.count >= 2
+    }
+
     func syncRecentConversations() async {
-        guard !isTransferring else { return }
+        guard !isTransferring, canSyncConversations else { return }
         feedbackClearTask?.cancel()
         transferSourceID = nil
         isSyncing = true
         defer { isSyncing = false }
         transferFeedback = TransferFeedback(style: .progress, message: "Syncing the last 10 days…")
         do {
-            let result = try await transferService.syncRecentSessions(across: statuses.map(\.profile))
+            let result = try await transferService.syncRecentSessions(across: codexProfiles)
             if result.issues.isEmpty {
                 transferFeedback = TransferFeedback(
                     style: .success,

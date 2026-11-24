@@ -156,6 +156,26 @@ struct UsageStoreClaudeTests {
         ))
     }
 
+    @Test("Leaves Claude accounts out of the Codex conversation sync")
+    func syncsCodexAccountsOnly() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let personal = try profile("claude-personal", in: home)
+        let codex = CodexProfile(id: "codex", displayName: "codex", homeURL: home.appending(path: ".codex"))
+        let before = try FileManager.default.contentsOfDirectory(atPath: work.homeURL.path)
+
+        let claudeOnly = try makeStore([work, personal], home: home)
+        #expect(claudeOnly.canSyncConversations == false)
+        await claudeOnly.syncRecentConversations()
+        #expect(claudeOnly.transferFeedback == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: work.homeURL.path) == before)
+
+        let mixed = try makeStore([codex, work, personal], home: home)
+        #expect(mixed.codexProfiles.map(\.id) == ["codex"])
+        #expect(mixed.canSyncConversations == false)
+    }
+
     private func makeStore(_ profiles: [CodexProfile], home: URL) throws -> UsageStore {
         let executable = home.appending(path: "claude")
         try Data("#!/bin/sh\n\(fakeClaude)\n".utf8).write(to: executable)

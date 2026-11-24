@@ -77,7 +77,7 @@ next to that account.
 ### Sync recent conversations across accounts
 
 Click the two arrows at the bottom of the dashboard to share conversations
-active in the last 10 days across the configured accounts. Open a destination
+active in the last 10 days across the configured Codex accounts. Open a destination
 alias in the project and use `/resume` to pick up a conversation. If the same
 conversation has different histories on two accounts, the sync reports the
 conflict, keeps both copies, and continues with other conversations. When
