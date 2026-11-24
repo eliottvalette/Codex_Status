@@ -4,7 +4,6 @@ import Foundation
 /// any other directory is selected with `CLAUDE_CONFIG_DIR`.
 enum ClaudeProfiles {
     static let defaultDirectoryName = ".claude"
-    private static let maximumProjectNameLength = 200
 
     /// Finds `~/.claude` and every `~/.claude-*` directory that holds Claude Code data.
     static func discover(
@@ -53,26 +52,6 @@ enum ClaudeProfiles {
             == home.appending(path: defaultDirectoryName).standardizedFileURL.path
     }
 
-    /// The folder name Claude Code gives a working directory under `projects/`: every
-    /// UTF-16 unit outside `[A-Za-z0-9]` becomes a hyphen. Longer names are cut at 200
-    /// characters and end with a hash, which `matchesProjectDirectory` allows for.
-    static func projectDirectoryName(for workingDirectory: String) -> String {
-        String(String.UnicodeScalarView(workingDirectory.utf16.map { unit -> Unicode.Scalar in
-            let isAlphanumeric = (0x30...0x39).contains(unit)
-                || (0x41...0x5A).contains(unit)
-                || (0x61...0x7A).contains(unit)
-            return isAlphanumeric ? Unicode.Scalar(UInt8(unit)) : "-"
-        }))
-    }
-
-    static func matchesProjectDirectory(_ name: String, workingDirectory: String) -> Bool {
-        let encoded = projectDirectoryName(for: workingDirectory)
-        if encoded.count <= maximumProjectNameLength {
-            return name == encoded
-        }
-        return name.hasPrefix(encoded.prefix(maximumProjectNameLength) + "-")
-    }
-
     /// Creates `~/.claude-<name>` and a `claude-<name>` alias in the shell file, as
     /// `claude-accounts add` does. Returns the new profile.
     static func createAccount(
@@ -94,7 +73,8 @@ enum ClaudeProfiles {
         if hasAlias == false {
             let shellFile = home.appending(path: shell.hasSuffix("bash") ? ".bashrc" : ".zshrc")
             let line = "\n# Claude Code account, added by CodexMeter\nalias \(alias)='CLAUDE_CONFIG_DIR=\"$HOME/.\(alias)\" claude'\n"
-            if let handle = try? FileHandle(forWritingTo: shellFile) {
+            if FileManager.default.fileExists(atPath: shellFile.path) {
+                let handle = try FileHandle(forWritingTo: shellFile)
                 defer { try? handle.close() }
                 try handle.seekToEnd()
                 try handle.write(contentsOf: Data(line.utf8))
@@ -112,8 +92,12 @@ enum ClaudeProfiles {
         return name.range(of: #"^[a-z0-9][a-z0-9-]{0,39}$"#, options: .regularExpression) == nil ? nil : name
     }
 
-    static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    /// `value` as one shell word: as it is when that is safe, otherwise in single quotes.
+    static func shellWord(_ value: String) -> String {
+        if value.isEmpty == false, value.range(of: #"^[A-Za-z0-9_@%+=:,./-]+$"#, options: .regularExpression) != nil {
+            return value
+        }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static func isDirectory(_ url: URL) -> Bool {

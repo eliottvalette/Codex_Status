@@ -14,23 +14,22 @@ enum LowLimits {
 
     /// The least left on any window of the account, in percent, or `nil` with no reading.
     static func room(of status: ProfileStatus) -> Int? {
-        guard let snapshot = status.snapshot else { return nil }
-        let windows = [snapshot.shortWindow, snapshot.weeklyWindow].compactMap { $0 }
-            + snapshot.modelWindows.map(\.window)
-        return windows.map { Int($0.remainingPercent.rounded()) }.min()
+        status.snapshot?.allWindows.map { Int($0.remainingPercent.rounded()) }.min()
     }
 
     static func lowIDs(in statuses: [ProfileStatus]) -> Set<String> {
         Set(statuses.filter { (room(of: $0) ?? 100) <= threshold }.map(\.id))
     }
 
-    /// The other account of the same provider with the most room, when it is not low itself.
+    /// The other account of the same provider with the most room, when it is not low itself
+    /// and its last reading worked: an account that cannot be read cannot take the work.
     static func roomiest(
         besides status: ProfileStatus,
         in statuses: [ProfileStatus]
     ) -> (status: ProfileStatus, room: Int)? {
         statuses
             .filter { $0.id != status.id && $0.profile.provider == status.profile.provider }
+            .filter { $0.errorMessage == nil && $0.signIn != .signedOut }
             .compactMap { other in room(of: other).map { (status: other, room: $0) } }
             .filter { $0.room > threshold }
             .max { $0.room < $1.room }

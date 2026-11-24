@@ -24,7 +24,11 @@ struct RecentClaudeChat: Identifiable, Equatable, Sendable {
     let copiedToProfileIDs: Set<String>
 
     /// The same conversation in two accounts is one row.
-    var id: String { "\(file.projectDirectoryName)/\(file.sessionID)" }
+    var id: String { Self.id(of: file) }
+
+    static func id(of file: ClaudeSessionTransferService.TranscriptFile) -> String {
+        "\(file.projectDirectoryName)/\(file.sessionID)"
+    }
 
     /// The age `claude-who` prints: `now`, `12m`, `5h` or `2d 3h`.
     static func ageLabel(since date: Date, relativeTo now: Date) -> String {
@@ -41,15 +45,17 @@ struct RecentClaudeChat: Identifiable, Equatable, Sendable {
         in profile: CodexProfile,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> String {
-        var command = "claude --resume \(file.sessionID)"
+        var command = "claude --resume \(ClaudeProfiles.shellWord(file.sessionID))"
         if ClaudeProfiles.usesDefaultDirectory(profile, home: home) == false {
             let directory = profile.homeURL.standardizedFileURL
             let inHome = directory.deletingLastPathComponent().path == home.standardizedFileURL.path
-            let path = inHome ? "\"$HOME/\(directory.lastPathComponent)\"" : ClaudeProfiles.shellQuoted(directory.path)
+            let path = inHome
+                ? "\"$HOME\"/" + ClaudeProfiles.shellWord(directory.lastPathComponent)
+                : ClaudeProfiles.shellWord(directory.path)
             command = "CLAUDE_CONFIG_DIR=\(path) " + command
         }
         guard let workingDirectory else { return command }
-        return "cd \(ClaudeProfiles.shellQuoted(workingDirectory)) && " + command
+        return "cd \(ClaudeProfiles.shellWord(workingDirectory)) && " + command
     }
 }
 
@@ -67,7 +73,6 @@ actor ClaudeChatCatalog {
         var lastUserMessageAt: Date?
         var workingDirectory: String?
 
-        /// The order `claude-who` uses.
         /// The order `claude-who` uses, with the Claude app's title after a custom one.
         func title(appTitle: String? = nil) -> String {
             [customTitle, appTitle, aiTitle, summary, firstPrompt]
@@ -172,7 +177,7 @@ actor ClaudeChatCatalog {
             guard let summary = summary(of: file), let lastMessageAt = summary.lastUserMessageAt else {
                 continue
             }
-            let id = "\(file.projectDirectoryName)/\(file.sessionID)"
+            let id = RecentClaudeChat.id(of: file)
             if let existing = chats[id] {
                 // Identical copies stay under the account listed first, usually the original.
                 let keepsExisting = existing.at == lastMessageAt
@@ -339,26 +344,31 @@ actor ClaudeChatCatalog {
                 .appending(path: chat.file.projectDirectoryName)
                 .appending(path: chat.file.url.lastPathComponent)
         }
+        let files = [chat.file.url] + copies
+        // A record Claude Code is still writing would merge with this one, so every copy is
+        // checked before any is written, and the copies stay identical.
+        for url in files where try endsWithNewline(url) == false {
+            throw ClaudeSessionTransferError.incompleteTranscript(sessionID: chat.file.sessionID)
+        }
         let renamedAt = Date()
-        for url in [chat.file.url] + copies {
-            let handle = try FileHandle(forUpdating: url)
-            do {
-                let end = try handle.seekToEnd()
-                // A record Claude Code is still writing would merge with this one.
-                if end > 0 {
-                    try handle.seek(toOffset: end - 1)
-                    guard try handle.read(upToCount: 1) == Data([0x0A]) else {
-                        throw ClaudeSessionTransferError.incompleteTranscript(sessionID: chat.file.sessionID)
-                    }
-                }
-                try handle.write(contentsOf: Data((record + "\n").utf8))
-                try handle.close()
-            } catch {
-                try? handle.close()
-                throw error
-            }
+        for url in files {
+            // Append mode puts the record after anything Claude Code writes meanwhile.
+            let descriptor = open(url.path, O_WRONLY | O_APPEND)
+            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            try handle.write(contentsOf: Data((record + "\n").utf8))
+            try handle.close()
             try FileManager.default.setAttributes([.modificationDate: renamedAt], ofItemAtPath: url.path)
         }
+    }
+
+    private static func endsWithNewline(_ url: URL) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let end = try handle.seekToEnd()
+        guard end > 0 else { return true }
+        try handle.seek(toOffset: end - 1)
+        return try handle.read(upToCount: 1) == Data([0x0A])
     }
 
     /// One line, no control characters, at most 100 characters.

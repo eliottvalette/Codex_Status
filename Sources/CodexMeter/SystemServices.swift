@@ -38,12 +38,14 @@ struct Desktop: DesktopActions {
         let executable = (try? ClaudeCLI().resolvedExecutable().path) ?? "claude"
         let configuration = ClaudeProfiles.usesDefaultDirectory(profile)
             ? "unset CLAUDE_CONFIG_DIR"
-            : "export CLAUDE_CONFIG_DIR=\(ClaudeProfiles.shellQuoted(profile.homeURL.path))"
+            : "export CLAUDE_CONFIG_DIR=\(ClaudeProfiles.shellWord(profile.homeURL.path))"
+        // The account name is the user's own text, so it is quoted like everything else.
+        let greeting = "Signing in to \(profile.displayName). Run /login if Claude Code does not ask."
         let text = """
             #!/bin/zsh
             \(configuration)
-            echo "Signing in to \(profile.displayName). Run /login if Claude Code does not ask."
-            exec \(ClaudeProfiles.shellQuoted(executable))
+            echo \(ClaudeProfiles.shellWord(greeting))
+            exec \(ClaudeProfiles.shellWord(executable))
 
             """
         do {

@@ -234,11 +234,4 @@ struct ClaudeSessionTransferServiceTests {
         try data.write(to: url)
         try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: url.path)
     }
-
-    private func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "CodexMeterTests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
 }

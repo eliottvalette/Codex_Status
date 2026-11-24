@@ -60,7 +60,7 @@ struct ClaudeRecentChatsTests {
                   to: work, name: "s0", modifiedAt: base.addingTimeInterval(120))
         try write([#"{"type":"summary","summary":"No prompt","leafUuid":"x"}"#], to: work, name: "empty", modifiedAt: base.addingTimeInterval(180))
         try write([prompt("task", at: "2026-11-21T10:00:00Z")], to: work, name: "agent-abc", modifiedAt: base.addingTimeInterval(240))
-        let catalog = ClaudeChatCatalog(home: URL(fileURLWithPath: "/Users/me"))
+        let catalog = ClaudeChatCatalog(home: URL(fileURLWithPath: "/Users/me"), appSessionsURL: home)
 
         let chats = await catalog.recentChats(in: [work, personal])
 
@@ -169,10 +169,16 @@ struct ClaudeRecentChatsTests {
         try ClaudeChatCatalog.rename(renamed, to: "   ", in: [work, personal])
         #expect(await catalog.recentChats(in: [work, personal]).first?.title == #"Login "fix"/v2"#)
 
-        try Data(prompt("cut off", at: "2026-11-20T11:00:00Z").utf8).write(to: chat.file.url, options: .atomic)
+        let copyURL = personal.homeURL.appending(path: "projects/\(project)/s1.jsonl")
+        let original = try Data(contentsOf: chat.file.url)
+        let handle = try FileHandle(forWritingTo: copyURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(#"{"type":"user","#.utf8))
+        try handle.close()
         #expect(throws: ClaudeSessionTransferError.incompleteTranscript(sessionID: "s1")) {
-            try ClaudeChatCatalog.rename(chat, to: "Other", in: [work])
+            try ClaudeChatCatalog.rename(renamed, to: "Other", in: [work, personal])
         }
+        #expect(try Data(contentsOf: chat.file.url) == original, "no copy is written when one is mid-record")
     }
 
     @Test("Leaves out what the Claude app archived and uses the app's titles")
@@ -227,11 +233,11 @@ struct ClaudeRecentChatsTests {
         }
 
         #expect(chat(cwd: "/Users/me/app").resumeCommand(in: account("/Users/me/.claude"), home: home)
-            == "cd '/Users/me/app' && claude --resume s1")
+            == "cd /Users/me/app && claude --resume s1")
         #expect(chat(cwd: "/Users/me/it's here").resumeCommand(in: account("/Users/me/.claude-work"), home: home)
-            == #"cd '/Users/me/it'\''s here' && CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude --resume s1"#)
-        #expect(chat(cwd: nil).resumeCommand(in: account("/Volumes/x/.claude-y"), home: home)
-            == "CLAUDE_CONFIG_DIR='/Volumes/x/.claude-y' claude --resume s1")
+            == #"cd '/Users/me/it'\''s here' && CLAUDE_CONFIG_DIR="$HOME"/.claude-work claude --resume s1"#)
+        #expect(chat(cwd: nil).resumeCommand(in: account("/Volumes/my disk/.claude-y"), home: home)
+            == "CLAUDE_CONFIG_DIR='/Volumes/my disk/.claude-y' claude --resume s1")
     }
 
     @Test("Formats ages the way claude-who does")
@@ -266,12 +272,5 @@ struct ClaudeRecentChatsTests {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try transcript(lines).write(to: url)
         try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: url.path)
-    }
-
-    private func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "CodexMeterTests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     }
 }

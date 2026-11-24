@@ -29,14 +29,8 @@ struct DashboardView: View {
                 QuadrantGrid(
                     statuses: codexStatuses,
                     mostRecentID: store.mostRecentProfileID,
-                    onProfileRightClick: { profileID in
-                        Task { await store.handleProfileTap(profileID) }
-                    },
-                    onProfileLeftClick: {
-                        if store.transferSourceID != nil {
-                            store.cancelTransferSelection()
-                        }
-                    }
+                    onProfileRightClick: selectForCopy,
+                    onProfileLeftClick: cancelCopySelection
                 )
                 .frame(height: DashboardLayout.codexGridHeight)
             }
@@ -55,14 +49,8 @@ struct DashboardView: View {
                     onRename: { profileID, name in
                         store.renameAccount(profileID, to: name)
                     },
-                    onProfileRightClick: { profileID in
-                        Task { await store.handleProfileTap(profileID) }
-                    },
-                    onProfileLeftClick: {
-                        if store.transferSourceID != nil {
-                            store.cancelTransferSelection()
-                        }
-                    }
+                    onProfileRightClick: selectForCopy,
+                    onProfileLeftClick: cancelCopySelection
                 )
             }
             if store.showsRecentChats {
@@ -78,12 +66,22 @@ struct DashboardView: View {
             store.cancelTransferSelection()
         }
     }
+
+    private func selectForCopy(_ profileID: String) {
+        Task { await store.handleProfileTap(profileID) }
+    }
+
+    private func cancelCopySelection() {
+        if store.transferSourceID != nil {
+            store.cancelTransferSelection()
+        }
+    }
 }
 
 // MARK: - Claude rows
 
-/// Claude profiles are discovered at launch, so they are laid out two to a row
-/// below the fixed Codex grid.
+/// The number of Claude profiles varies, so they are laid out two to a row below the
+/// fixed Codex grid.
 private struct ProfileRows: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
@@ -132,6 +130,7 @@ private struct ProfileRows: View {
             onReconnect: onReconnect,
             onRename: onRename
         )
+        .id(status.id)
         .frame(maxWidth: .infinity)
     }
 }
@@ -144,7 +143,7 @@ private struct RecentChatsSection: View {
     let store: UsageStore
     @ViewState private var renamingID: String?
     @ViewState private var draftTitle = ""
-    @ViewState private var shownCount = RecentClaudeChat.pageSize
+    @ViewState private var showsAll = false
     @FocusState private var isEditingTitle: Bool
 
     var body: some View {
@@ -164,27 +163,33 @@ private struct RecentChatsSection: View {
                     .foregroundStyle(.tertiary)
             } else {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
-                        ForEach(store.recentChats.prefix(shownCount)) { chat in
-                            row(chat, now: context.date)
+                    if showsAll {
+                        ScrollView {
+                            rows(store.recentChats, now: context.date)
                         }
+                        .frame(maxHeight: 300)
+                    } else {
+                        rows(store.recentChats.prefix(RecentClaudeChat.pageSize), now: context.date)
                     }
                 }
-                HStack(spacing: 12) {
-                    if store.recentChats.count > shownCount {
-                        Button("See more") { shownCount += RecentClaudeChat.pageSize }
-                    }
-                    if shownCount > RecentClaudeChat.pageSize {
-                        Button("See less") { shownCount = RecentClaudeChat.pageSize }
-                    }
+                if store.recentChats.count > RecentClaudeChat.pageSize {
+                    Button(showsAll ? "See less" : "See more") { showsAll.toggle() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func rows(_ chats: some RandomAccessCollection<RecentClaudeChat>, now: Date) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
+            ForEach(Array(chats)) { chat in
+                row(chat, now: now)
+            }
+        }
     }
 
     private func row(_ chat: RecentClaudeChat, now: Date) -> some View {
@@ -240,6 +245,9 @@ private struct RecentChatsSection: View {
                     Task { await store.renameChat(chat, to: title) }
                 }
                 .onExitCommand { renamingID = nil }
+                .onChange(of: isEditingTitle) { _, isFocused in
+                    if isFocused == false { renamingID = nil }
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             HStack(spacing: 4) {
@@ -441,6 +449,9 @@ private struct AliasQuadrant: View {
                         onRename?(status.id, draftName)
                     }
                     .onExitCommand { isRenaming = false }
+                    .onChange(of: isEditingName) { _, isFocused in
+                        if isFocused == false { isRenaming = false }
+                    }
             } else {
                 nameLabel.hidden()
                 if onRename != nil {
@@ -769,7 +780,7 @@ private struct QuotaGauge: View {
     }
 }
 
-// MARK: - Control row
+// MARK: - Text fields in the panel
 
 /// Makes the menu bar panel take the keyboard, so typing reaches the text field it sits
 /// behind. The app runs in the background, and its panel does not take the keyboard on its own.
@@ -785,6 +796,8 @@ private struct TakesKeyboard: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
+
+// MARK: - Control row
 
 /// Creates a Claude account and opens Terminal in it to sign in.
 private struct AddAccountButton: View {

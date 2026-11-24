@@ -1,6 +1,16 @@
 import Darwin
 import Foundation
 
+struct SessionTransferResult: Sendable, Equatable {
+    let sessionCount: Int
+    let copiedCount: Int
+    var pickerImportsCount = 0
+
+    var alreadyPresentCount: Int {
+        sessionCount - copiedCount
+    }
+}
+
 struct SessionSyncResult: Sendable {
     var updatedCount = 0
     var issues: [String] = []

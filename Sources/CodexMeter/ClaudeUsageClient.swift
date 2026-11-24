@@ -73,6 +73,8 @@ struct ClaudeUsageClient: Sendable {
             for: profile,
             timeout: timeout,
             onLine: { line in
+                // Anything printed before the JSON, such as a warning, is not part of it.
+                guard output.isEmpty == false || line.first == UInt8(ascii: "{") else { return nil }
                 output.append(line)
                 return ClaudeUsageParser.parseSignIn(output)
             }

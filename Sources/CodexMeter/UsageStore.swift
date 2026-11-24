@@ -44,7 +44,7 @@ final class UsageStore {
     ) {
         statuses = profiles.map {
             ProfileStatus(
-                profile: settings.accountNames[$0.id].map($0.named) ?? $0,
+                profile: Self.named($0, by: settings),
                 snapshot: nil,
                 errorMessage: nil,
                 lastActivity: nil,
@@ -169,6 +169,7 @@ final class UsageStore {
                     from: sourceProfile,
                     to: tappedProfile
                 )
+                await reloadRecentChats()
             }
             transferSourceID = nil
             transferDestinationID = nil
@@ -211,15 +212,11 @@ final class UsageStore {
 
     /// Copies one conversation from the recent-chats list. The original stays where it is.
     func copyChat(_ chat: RecentClaudeChat, to destinationID: String) async {
-        guard isTransferring == false else { return }
         guard
             let source = claudeProfiles.first(where: { $0.id == chat.profileID }),
             let destination = claudeProfiles.first(where: { $0.id == destinationID })
         else {
-            transferFeedback = TransferFeedback(
-                style: .failure,
-                message: "Unknown account: \(destinationID)"
-            )
+            report("Unknown account: \(chat.profileID) or \(destinationID)", style: .failure)
             return
         }
 
@@ -255,6 +252,7 @@ final class UsageStore {
     }
 
     func renameChat(_ chat: RecentClaudeChat, to title: String) async {
+        guard ClaudeChatCatalog.cleanTitle(title).isEmpty == false else { return }
         do {
             try ClaudeChatCatalog.rename(chat, to: title, in: claudeProfiles)
             report("✓ Renamed", style: .success)
@@ -274,11 +272,16 @@ final class UsageStore {
             return
         }
         if statuses.contains(where: { $0.profile.homeURL.standardizedFileURL == profile.homeURL.standardizedFileURL }) == false {
-            statuses.append(ProfileStatus(profile: settings.accountNames[profile.id].map(profile.named) ?? profile))
+            statuses.append(ProfileStatus(profile: Self.named(profile, by: settings)))
         }
         desktop.openSignIn(for: profile)
-        await refresh()
         report("Sign in to \(profile.displayName) in Terminal, then press Reconnect", style: .progress)
+        await read([profile])
+        await reloadRecentChats()
+    }
+
+    private static func named(_ profile: CodexProfile, by settings: AppSettings) -> CodexProfile {
+        settings.accountNames[profile.id].map(profile.named) ?? profile
     }
 
     /// Gives an account another name in the app. Its folder and alias keep theirs, because
@@ -295,31 +298,38 @@ final class UsageStore {
     /// opens Terminal in it so the user can sign in again.
     func reconnect(_ profileID: String) async {
         guard
-            isRefreshing == false,
             let index = statuses.firstIndex(where: { $0.id == profileID }),
-            statuses[index].profile.provider == .claude
+            statuses[index].profile.provider == .claude,
+            statuses[index].isRefreshing == false
         else { return }
-        let name = statuses[index].profile.displayName
+        let profile = statuses[index].profile
         claudeUsagePausedUntil[profileID] = nil
         statuses[index].signIn = nil
-        report("Reconnecting \(name)…", style: .progress)
-        await refresh()
+        report("Reconnecting \(profile.displayName)…", style: .progress)
+        await read([profile])
         guard let status = statuses.first(where: { $0.id == profileID }) else { return }
         if status.errorMessage == nil, status.signIn != .signedOut {
-            report("✓ \(name) reconnected", style: .success)
+            report("✓ \(profile.displayName) reconnected", style: .success)
             return
         }
-        desktop.openSignIn(for: status.profile)
-        report("\(name) is still disconnected. Sign in again in Terminal with /login, then press Reconnect.", style: .progress)
+        desktop.openSignIn(for: profile)
+        report(
+            status.signIn == .signedOut
+                ? "\(profile.displayName) is signed out. Sign in in Terminal with /login, then press Reconnect."
+                : "\(profile.displayName) still can't be read. Terminal is open in it to check or sign in again.",
+            style: .progress
+        )
     }
 
     func report(_ message: String, style: TransferFeedback.Style) {
+        feedbackClearTask?.cancel()
         transferFeedback = TransferFeedback(style: style, message: message)
         if style == .success { scheduleFeedbackClear() }
     }
 
     /// Copies the chats one by one and reloads the list. Returns how many were written, or
-    /// `nil` when another copy is running or this one failed, which the status line shows.
+    /// `nil` when another copy is running or a chat failed; a failure is shown in the status
+    /// line, and the other chats are still copied.
     private func copyChats(
         _ chats: [RecentClaudeChat],
         from source: CodexProfile,
@@ -333,20 +343,25 @@ final class UsageStore {
             style: .progress,
             message: "Copying to \(destination.displayName)…"
         )
-        var copiedCount: Int? = 0
-        do {
-            for chat in chats {
-                copiedCount? += try await claudeTransferService.transferSession(
+        var copiedCount = 0
+        var failures: [String] = []
+        for chat in chats {
+            do {
+                copiedCount += try await claudeTransferService.transferSession(
                     chat.file, from: source, to: destination
                 ).copiedCount
+            } catch {
+                failures.append(error.localizedDescription)
             }
-        } catch {
-            copiedCount = nil
-            report(error.localizedDescription, style: .failure)
         }
         transferDestinationID = nil
         await reloadRecentChats()
-        return copiedCount
+        guard let firstFailure = failures.first else { return copiedCount }
+        report(
+            chats.count == 1 ? firstFailure : "\(failures.count) of \(chats.count) chats not copied: \(firstFailure)",
+            style: .failure
+        )
+        return nil
     }
 
     private func scheduleFeedbackClear() {
@@ -359,15 +374,6 @@ final class UsageStore {
             }
             self?.transferFeedback = nil
         }
-    }
-
-    var lowestRemainingPercent: Int? {
-        statuses
-            .compactMap(\.snapshot)
-            .flatMap { [$0.shortWindow, $0.weeklyWindow] }
-            .compactMap { $0 }
-            .map { Int($0.remainingPercent.rounded()) }
-            .min()
     }
 
     var lowestRemaining: LowestRemainingQuota? {
@@ -410,17 +416,26 @@ final class UsageStore {
     func refresh() async {
         guard isRefreshing == false else { return }
         isRefreshing = true
-        for index in statuses.indices {
+        await read(statuses.map(\.profile))
+        await reloadRecentChats()
+        isRefreshing = false
+        await handleLowLimits()
+        await handlePostRefresh()
+    }
+
+    /// Reads the quota, last activity and sign-in of the given profiles.
+    private func read(_ profiles: [CodexProfile]) async {
+        let ids = Set(profiles.map(\.id))
+        for index in statuses.indices where ids.contains(statuses[index].id) {
             statuses[index].isRefreshing = true
         }
 
-        let profiles = statuses.map(\.profile)
         let clients = self.clients
         let pausedIDs = Set(claudeUsagePausedUntil.filter { $0.value > .now }.keys)
         // Who an account is signed in as is read until it is known.
         let signInIDs = Set(statuses.filter { status in
             if case .signedIn = status.signIn { return false }
-            return status.profile.provider == .claude
+            return status.profile.provider == .claude && ids.contains(status.id)
         }.map(\.id))
 
         await withTaskGroup(of: FetchResult.self) { group in
@@ -442,7 +457,7 @@ final class UsageStore {
                         do {
                             quotaOutcome = .success(try await clients.fetchRateLimits(for: profile))
                         } catch ClaudeUsageError.usageTemporarilyUnavailable {
-                            quotaOutcome = .unavailable(ClaudeUsageError.usageTemporarilyUnavailable.localizedDescription)
+                            quotaOutcome = .unavailable
                         } catch {
                             quotaOutcome = .failure(error.localizedDescription)
                         }
@@ -477,8 +492,8 @@ final class UsageStore {
                     claudeUsagePausedUntil[result.profileID] = nil
                 case let .failure(message):
                     statuses[index].errorMessage = message
-                case let .unavailable(message):
-                    statuses[index].errorMessage = message
+                case .unavailable:
+                    statuses[index].errorMessage = ClaudeUsageError.usageTemporarilyUnavailable.localizedDescription
                     claudeUsagePausedUntil[result.profileID] = .now.addingTimeInterval(ClaudeUsagePolicy.retryDelay)
                 case .paused:
                     break
@@ -493,11 +508,6 @@ final class UsageStore {
                 }
             }
         }
-
-        await reloadRecentChats()
-        isRefreshing = false
-        await handleLowLimits()
-        await handlePostRefresh()
     }
 
     /// Announces each account that has just become low, and moves its chats when the
@@ -512,7 +522,7 @@ final class UsageStore {
             }
         }
         lowAccountIDs = low
-        if settings.chatMoves == .automatic, let chatMove {
+        if settings.chatMoves == .automatic, transferSourceID == nil, let chatMove {
             await moveChats(chatMove)
         }
     }
@@ -817,7 +827,7 @@ private enum FetchOutcome: Sendable {
     case success(QuotaSnapshot)
     case failure(String)
     /// Claude Code answered without limits; reads pause for a while.
-    case unavailable(String)
+    case unavailable
     /// Not read this time because reads are paused.
     case paused
 }

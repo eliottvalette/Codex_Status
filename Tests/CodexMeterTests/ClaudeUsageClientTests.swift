@@ -194,6 +194,21 @@ struct ClaudeUsageClientTests {
         #expect(ClaudeUsageParser.parseSignIn(Data(#"{"loggedIn": true,"#.utf8)) == nil, "more lines to come")
     }
 
+    @Test("Reads the sign-in when Claude Code prints a line before the JSON")
+    func readsSignInAfterAWarning() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let executable = try script(in: home, """
+            echo 'A newer version of Claude Code is available.'
+            printf '{\\n  "loggedIn": true,\\n  "email": "me@example.com"\\n}\\n'
+            """)
+        let client = ClaudeUsageClient(cli: ClaudeCLI(executableURL: executable, home: home), timeout: 5)
+
+        let signIn = try await client.fetchSignIn(for: try profile(".claude-work", in: home))
+
+        #expect(signIn == .signedIn(email: "me@example.com"))
+    }
+
     @Test("Ignores every other line Claude Code prints")
     func ignoresUnrelatedLines() throws {
         for line in [
@@ -374,14 +389,6 @@ struct ClaudeUsageClientTests {
         let url = directory.appending(path: name)
         try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        return url
-    }
-
-    private func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "CodexMeterTests-\(UUID().uuidString)")
-            .resolvingSymlinksInPath()
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 }

@@ -149,7 +149,7 @@ final class UsageStoreClaudeTests {
 
         #expect(try calls(work).filter { $0 == "usage" }.count == reads + 1, "the pause does not hold it back")
         #expect(recorder.signIns == [work.id])
-        #expect(store.transferFeedback?.message.hasPrefix("claude-work is still disconnected") == true)
+        #expect(store.transferFeedback?.message.hasPrefix("claude-work still can't be read") == true)
 
         try FileManager.default.removeItem(at: work.homeURL.appending(path: "limited"))
         await store.reconnect(work.id)
@@ -228,7 +228,8 @@ final class UsageStoreClaudeTests {
             profiles: [work],
             claudeClient: ClaudeUsageClient(cli: ClaudeCLI(executableURL: home.appending(path: "absent"), home: home)),
             settings: settings,
-            desktop: recorder
+            desktop: recorder,
+            home: home
         )
 
         await store.refresh()
@@ -351,6 +352,7 @@ final class UsageStoreClaudeTests {
         try Data("95".utf8).write(to: work.homeURL.appending(path: "weekly"))
         let transcript = try writeChat(to: work)
         settings.chatMoves = .automatic
+        settings.startsIdleClaudeWindows = false
         let store = try makeStore([work, personal], home: home)
 
         await store.refresh()
@@ -359,6 +361,15 @@ final class UsageStoreClaudeTests {
         #expect(store.transferFeedback?.message == "✓ 1 chat from claude-work copied to claude-personal")
         #expect(store.chatMove == nil, "nothing is left to move")
         #expect(recorder.notifications.isEmpty, "notifications are off by default")
+
+        // A chat that cannot be copied does not stop the others.
+        let partial = transcript + Data(#"{"type":"user","#.utf8)
+        try partial.write(to: work.homeURL.appending(path: "projects/-Users-me-app/s2.jsonl"))
+        try transcript.write(to: work.homeURL.appending(path: "projects/-Users-me-app/s3.jsonl"))
+        await store.refresh()
+
+        #expect(FileManager.default.fileExists(atPath: personal.homeURL.appending(path: "projects/-Users-me-app/s3.jsonl").path))
+        #expect(store.transferFeedback?.message.hasPrefix("1 of 2 chats not copied") == true)
     }
 
     @Test("Leaves Claude accounts out of the Codex conversation sync")
@@ -432,13 +443,5 @@ final class UsageStoreClaudeTests {
         func openSignIn(for profile: CodexProfile) {
             signIns.append(profile.id)
         }
-    }
-
-    private func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "CodexMeterTests-\(UUID().uuidString)")
-            .resolvingSymlinksInPath()
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     }
 }

@@ -143,6 +143,11 @@ struct QuotaSnapshot: Equatable, Sendable {
             .filter { $0.window.state != .dormant }
             .min(by: { $0.window.remainingPercent < $1.window.remainingPercent })
     }
+
+    /// Every window that limits the account, single-model ones included.
+    var allWindows: [QuotaWindow] {
+        [shortWindow, weeklyWindow].compactMap { $0 } + modelWindows.map(\.window)
+    }
 }
 
 /// Who a Claude profile is signed in as, from `claude auth status`.
@@ -213,9 +218,7 @@ struct LowestRemainingQuota: Equatable, Sendable {
         statuses
             .flatMap { status -> [LowestRemainingQuota] in
                 guard let snapshot = status.snapshot else { return [] }
-                let windows = [snapshot.shortWindow, snapshot.weeklyWindow].compactMap { $0 }
-                    + snapshot.modelWindows.map(\.window)
-                return windows.map {
+                return snapshot.allWindows.map {
                     LowestRemainingQuota(
                         provider: status.profile.provider,
                         percent: Int($0.remainingPercent.rounded())
@@ -223,16 +226,6 @@ struct LowestRemainingQuota: Equatable, Sendable {
                 }
             }
             .min(by: { $0.percent < $1.percent })
-    }
-}
-
-struct SessionTransferResult: Sendable, Equatable {
-    let sessionCount: Int
-    let copiedCount: Int
-    var pickerImportsCount = 0
-
-    var alreadyPresentCount: Int {
-        sessionCount - copiedCount
     }
 }
 

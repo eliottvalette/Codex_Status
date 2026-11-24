@@ -47,20 +47,6 @@ struct ClaudeProfilesTests {
         #expect(codex[0].provider == .codex)
     }
 
-    @Test("Encodes a working directory the way Claude Code names its project folder")
-    func encodesProjectDirectory() {
-        #expect(ClaudeProfiles.projectDirectoryName(for: "/Users/me/My Project_1.0") == "-Users-me-My-Project-1-0")
-        // Claude Code replaces UTF-16 units, so one emoji becomes two hyphens.
-        #expect(ClaudeProfiles.projectDirectoryName(for: "/tmp/é😀x") == "-tmp----x")
-        #expect(ClaudeProfiles.matchesProjectDirectory("-Users-me-app", workingDirectory: "/Users/me/app"))
-        #expect(ClaudeProfiles.matchesProjectDirectory("-Users-me-app2", workingDirectory: "/Users/me/app") == false)
-
-        let longPath = "/" + String(repeating: "a", count: 250)
-        let truncated = "-" + String(repeating: "a", count: 199)
-        #expect(ClaudeProfiles.matchesProjectDirectory(truncated + "-1x2y3z", workingDirectory: longPath))
-        #expect(ClaudeProfiles.matchesProjectDirectory(truncated, workingDirectory: longPath) == false)
-    }
-
     @Test("Parses Claude timestamps with any fractional precision and offset")
     func parsesTimestamps() throws {
         let base = Date(timeIntervalSince1970: 1_762_232_399)
@@ -141,12 +127,5 @@ struct ClaudeProfilesTests {
                 try ClaudeProfiles.createAccount(named: name, home: home)
             }
         }
-    }
-
-    private func temporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "CodexMeterTests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
     }
 }
