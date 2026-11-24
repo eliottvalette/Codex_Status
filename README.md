@@ -54,6 +54,12 @@ those limits, and the menu bar figure counts it.
   and can use a small amount of quota. For a Claude account, the request
   goes to the smallest model, at most once an hour, and the settings menu
   can turn it off.
+- **Accounts.** Each Claude account shows the email it is signed in as. When
+  an account has no current reading, because it is signed out or its usage
+  cannot be read, **Reconnect** reads it again at once and, if it is signed
+  out, opens Terminal in that account so you can sign in. The **+** button at
+  the bottom adds a Claude account: it creates `~/.claude-<name>` and a
+  `claude-<name>` alias, then opens Terminal there to sign in.
 - **Low limits.** An account is low when any of its limits has 10% or less
   left. The app can notify you once when an account becomes low, naming the
   account of the same provider with the most room left.
@@ -82,7 +88,8 @@ already has an identical copy on another account is listed once, with a ✓
 next to that account. After a copy, the command that resumes the
 conversation in the destination is on the clipboard, ready to paste in a
 terminal. The copy button on each row puts the command for the row's account
-there.
+there. Double-click a title to rename the conversation; the new name also
+shows in Claude Code's `/resume` and in `claude-who`.
 
 When a Claude account is low, Recent chats suggests moving its chats to the
 Claude account with the most room, with a **Move** button. The settings menu
@@ -187,7 +194,7 @@ plain text. Terminal rows are bold and colored by profile.
 
 ### Build and configure the menu bar app
 
-The menu bar app requires macOS 14 or newer, Xcode 26 or newer with Swift 6.2,
+The menu bar app requires macOS 14 or newer, Swift 6.2 or newer from Xcode 26 or its Command Line Tools,
 and an executable Codex CLI at `/opt/homebrew/bin/codex`. Claude accounts
 require Claude Code 2.1.261 or newer (tested with 2.1.331) at
 `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, `/usr/local/bin/claude`,
@@ -264,6 +271,15 @@ open dist/CodexMeter.app
   app then runs `claude --print "Reply exactly OK." --model haiku` once and
   reads the quota again. It waits an hour before it tries the same profile
   again.
+- **Claude accounts.** The email comes from `claude auth status`, read until
+  the profile is signed in. Reconnect clears the 15-minute pause and reads
+  the profile again. A new account's sign-in runs in Terminal from a
+  `.command` file, which needs no automation permission.
+- **Claude renames.** A rename appends the record Claude Code writes for
+  `/rename`, `{"type":"custom-title",...}`, to the transcript and to each
+  identical copy, and gives them the same modification time so they stay
+  identical. A transcript whose last record is still being written is left
+  alone.
 - **Low limits and chat moves.** After each refresh, a profile whose lowest
   window, per-model limits included, is at 10% or less is low. Each profile
   that has just become low is announced once. A chat move takes the lowest

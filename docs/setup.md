@@ -53,7 +53,9 @@ claude-work
 ```
 
 In the new session, sign in with `/login` using the work account, then quit.
-Repeat for each account. Then check them all:
+Repeat for each account. The **+** button at the bottom of the dashboard does
+the same from the app: it asks for a name, creates the account and opens
+Terminal there to sign in. Then check them all:
 
 ```zsh
 claude-accounts
@@ -67,8 +69,9 @@ claude       claude       you@example.com (claude.ai)     42
 claude-work  claude-work  you@company.com (claude.ai)     7
 ```
 
-Restart CodexMeter after adding an account: it finds accounts when it starts.
-An account appears once it has been opened and signed in.
+Restart CodexMeter after adding an account with `claude-accounts`: it finds
+accounts when it starts. An account added with **+** appears at once. Each
+account box shows the email it is signed in as.
 
 ## 4. Use it
 
@@ -109,6 +112,13 @@ an account becomes low.
 To copy the three newest conversations at once, right-click the source account
 and then the destination account.
 
+**Rename a conversation.** Double-click its title in Recent chats, type the
+new name and press Return. Claude Code's `/resume` shows the new name too.
+
+**Reconnect an account.** When an account box shows an error instead of its
+limits, click **Reconnect**. If the account is signed out, Terminal opens in
+it so you can sign in with `/login`; click **Reconnect** again afterwards.
+
 **Find a conversation.** In a project folder, run `claude-who` to see the ten
 latest conversations there, across accounts, with the account to open.
 
@@ -130,7 +140,7 @@ git pull
 | What you see | What to do |
 |---|---|
 | "This Claude Code is too old to report usage" | Run `claude update`, then refresh with **⌘R**. |
-| "This profile has no Claude plan limits" | The account is signed out or uses an API key. Open it and sign in with `/login` using a Claude subscription. |
+| "This profile has no Claude plan limits" | The account is signed out or uses an API key. Click **Reconnect** to sign in with a Claude subscription. |
 | "Usage is unavailable for now" | Anthropic's usage service is limiting reads for this account, often after many reads in a short time. The box keeps the last reading and the app tries again after 15 minutes; it usually clears within an hour. |
 | "Claude Code executable not found" | Install Claude Code in one of the locations in step 1. |
 | An account is missing | Check `claude-accounts`: the account must be signed in. Then restart CodexMeter. |
