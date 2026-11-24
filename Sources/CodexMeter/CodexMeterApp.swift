@@ -31,9 +31,9 @@ struct CodexMeterApp: App {
     }
 
     private var menuTitle: String {
-        guard let remaining = appDelegate.store.lowestRemainingPercent else {
-            return "Codex"
+        guard let lowest = appDelegate.store.lowestRemaining else {
+            return appDelegate.store.statuses.first?.profile.provider.displayName ?? "Codex"
         }
-        return "Codex \(remaining)%"
+        return "\(lowest.provider.displayName) \(lowest.percent)%"
     }
 }

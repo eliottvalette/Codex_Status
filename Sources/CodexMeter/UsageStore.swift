@@ -11,17 +11,25 @@ final class UsageStore {
     private(set) var transferSourceID: String?
     private(set) var transferDestinationID: String?
     private(set) var transferFeedback: TransferFeedback?
+    private(set) var recentChats: [RecentClaudeChat] = []
     private var hasPendingActivationCycle = false
     private var feedbackClearTask: Task<Void, Never>?
 
-    private let client: AppServerClient
+    private var lastClaudeActivationAttempts: [String: Date] = [:]
+
+    private let clients: ProviderClients
     private let transferService: SessionTransferService
+    private let claudeTransferService: ClaudeSessionTransferService
+    private let chatCatalog: ClaudeChatCatalog
     private let refreshInterval: Duration
 
     init(
-        profiles: [CodexProfile] = CodexProfile.configured,
+        profiles: [CodexProfile] = CodexProfile.launchProfiles(),
         client: AppServerClient = AppServerClient(),
+        claudeClient: ClaudeUsageClient = ClaudeUsageClient(),
         transferService: SessionTransferService = SessionTransferService(),
+        claudeTransferService: ClaudeSessionTransferService = ClaudeSessionTransferService(),
+        chatCatalog: ClaudeChatCatalog = ClaudeChatCatalog(),
         refreshInterval: Duration = .seconds(120)
     ) {
         statuses = profiles.map {
@@ -34,8 +42,10 @@ final class UsageStore {
                 isRefreshing: false
             )
         }
-        self.client = client
+        clients = ProviderClients(codex: client, claude: claudeClient)
         self.transferService = transferService
+        self.claudeTransferService = claudeTransferService
+        self.chatCatalog = chatCatalog
         self.refreshInterval = refreshInterval
     }
 
@@ -82,6 +92,16 @@ final class UsageStore {
             return
         }
 
+        // Codex and Claude Code store conversations in formats the other cannot resume.
+        guard sourceProfile.provider == tappedProfile.provider else {
+            feedbackClearTask?.cancel()
+            transferFeedback = TransferFeedback(
+                style: .failure,
+                message: "\(sourceProfile.displayName) → pick another \(sourceProfile.provider.displayName) account"
+            )
+            return
+        }
+
         transferDestinationID = tappedProfile.id
         transferFeedback = TransferFeedback(
             style: .progress,
@@ -89,10 +109,19 @@ final class UsageStore {
         )
 
         do {
-            let result = try await transferService.transferRecentSessions(
-                from: sourceProfile,
-                to: tappedProfile
-            )
+            let result: SessionTransferResult
+            switch sourceProfile.provider {
+            case .codex:
+                result = try await transferService.transferRecentSessions(
+                    from: sourceProfile,
+                    to: tappedProfile
+                )
+            case .claude:
+                result = try await claudeTransferService.transferRecentSessions(
+                    from: sourceProfile,
+                    to: tappedProfile
+                )
+            }
             transferSourceID = nil
             transferDestinationID = nil
 
@@ -115,6 +144,62 @@ final class UsageStore {
         }
     }
 
+    var claudeProfiles: [CodexProfile] {
+        statuses.map(\.profile).filter { $0.provider == .claude }
+    }
+
+    /// The list of recent chats only has a use when a chat can go to another account.
+    var showsRecentChats: Bool {
+        claudeProfiles.count >= 2
+    }
+
+    func reloadRecentChats() async {
+        guard showsRecentChats else {
+            recentChats = []
+            return
+        }
+        recentChats = await chatCatalog.recentChats(in: claudeProfiles)
+    }
+
+    /// Copies one conversation from the recent-chats list. The original stays where it is.
+    func copyChat(_ chat: RecentClaudeChat, to destinationID: String) async {
+        guard isTransferring == false else { return }
+        guard
+            let source = claudeProfiles.first(where: { $0.id == chat.profileID }),
+            let destination = claudeProfiles.first(where: { $0.id == destinationID })
+        else {
+            transferFeedback = TransferFeedback(
+                style: .failure,
+                message: "Unknown account: \(destinationID)"
+            )
+            return
+        }
+
+        feedbackClearTask?.cancel()
+        transferSourceID = nil
+        transferDestinationID = destination.id
+        transferFeedback = TransferFeedback(
+            style: .progress,
+            message: "Copying to \(destination.displayName)…"
+        )
+
+        do {
+            let result = try await claudeTransferService.transferSession(
+                chat.file, from: source, to: destination
+            )
+            let title = chat.title.count > 32 ? chat.title.prefix(31) + "…" : chat.title
+            let message = result.copiedCount == 0
+                ? "✓ “\(title)” already on \(destination.displayName)"
+                : "✓ “\(title)” copied to \(destination.displayName)"
+            transferFeedback = TransferFeedback(style: .success, message: message)
+            scheduleFeedbackClear()
+        } catch {
+            transferFeedback = TransferFeedback(style: .failure, message: error.localizedDescription)
+        }
+        transferDestinationID = nil
+        await reloadRecentChats()
+    }
+
     private func scheduleFeedbackClear() {
         feedbackClearTask?.cancel()
         feedbackClearTask = Task { [weak self] in
@@ -134,6 +219,10 @@ final class UsageStore {
             .compactMap { $0 }
             .map { Int($0.remainingPercent.rounded()) }
             .min()
+    }
+
+    var lowestRemaining: LowestRemainingQuota? {
+        LowestRemainingQuota.find(in: statuses)
     }
 
     var mostRecentProfileID: String? {
@@ -177,20 +266,20 @@ final class UsageStore {
         }
 
         let profiles = statuses.map(\.profile)
-        let client = self.client
+        let clients = self.clients
 
         await withTaskGroup(of: FetchResult.self) { group in
             for profile in profiles {
                 group.addTask {
                     let activityOutcome: ActivityOutcome
                     do {
-                        activityOutcome = .success(try await ActivityReader.latestActivity(for: profile))
+                        activityOutcome = .success(try await clients.latestActivity(for: profile))
                     } catch {
                         activityOutcome = .failure(error.localizedDescription)
                     }
 
                     do {
-                        let snapshot = try await client.fetchRateLimits(for: profile)
+                        let snapshot = try await clients.fetchRateLimits(for: profile)
                         return FetchResult(
                             profileID: profile.id,
                             quotaOutcome: .success(snapshot),
@@ -216,7 +305,8 @@ final class UsageStore {
                     let previousSnapshot = statuses[index].snapshot
                     let updatedSnapshot = classifySnapshot(
                         newSnapshot: newSnapshot,
-                        previousSnapshot: previousSnapshot
+                        previousSnapshot: previousSnapshot,
+                        provider: statuses[index].profile.provider
                     )
                     statuses[index].snapshot = updatedSnapshot
                     statuses[index].errorMessage = nil
@@ -234,6 +324,7 @@ final class UsageStore {
             }
         }
 
+        await reloadRecentChats()
         isRefreshing = false
         await handlePostRefresh()
     }
@@ -250,6 +341,11 @@ final class UsageStore {
     private var hasDormantOrUnconfirmedZeroUsageWindow: Bool {
         statuses.contains { status in
             guard let snapshot = status.snapshot else { return false }
+            if status.profile.provider == .claude {
+                return ClaudeActivationPolicy.shouldActivate(
+                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id]
+                )
+            }
             let shortCandidate = snapshot.shortWindow.map { $0.usedPercent == 0 && $0.state != .active } ?? false
             let weeklyCandidate = snapshot.weeklyWindow.map { $0.usedPercent == 0 && $0.state != .active } ?? false
             return shortCandidate || weeklyCandidate
@@ -285,6 +381,15 @@ final class UsageStore {
 
         for status in statuses {
             guard let snapshot = status.snapshot else { continue }
+            if status.profile.provider == .claude {
+                // Claude reports an idle window directly, so no second reading is needed.
+                if ClaudeActivationPolicy.shouldActivate(
+                    snapshot, lastAttempt: lastClaudeActivationAttempts[status.id]
+                ) {
+                    dormantProfiles.append(status.profile)
+                }
+                continue
+            }
             let isShortDormant = snapshot.shortWindow?.state == .dormant
             let isWeeklyDormant = snapshot.weeklyWindow?.state == .dormant
             if isShortDormant || isWeeklyDormant {
@@ -308,7 +413,7 @@ final class UsageStore {
 
             for candidate in probeCandidateProfiles {
                 do {
-                    let secondSnapshot = try await client.fetchRateLimits(for: candidate.profile)
+                    let secondSnapshot = try await clients.fetchRateLimits(for: candidate.profile)
                     let elapsedSeconds = secondSnapshot.fetchedAt.timeIntervalSince(candidate.snapshot.fetchedAt)
 
                     let classifiedShortWindow = secondSnapshot.shortWindow.map { currentWindow in
@@ -358,8 +463,11 @@ final class UsageStore {
 
         var activatedProfiles: [CodexProfile] = []
         for profile in dormantProfiles {
+            if profile.provider == .claude {
+                lastClaudeActivationAttempts[profile.id] = .now
+            }
             do {
-                try await client.sendActivationTurn(for: profile)
+                try await clients.sendActivationTurn(for: profile)
                 activatedProfiles.append(profile)
             } catch {
                 continue
@@ -371,7 +479,13 @@ final class UsageStore {
         var verificationFirstSnapshots: [(profile: CodexProfile, snapshot: QuotaSnapshot)] = []
         for profile in activatedProfiles {
             do {
-                let firstSnapshot = try await client.fetchRateLimits(for: profile)
+                let firstSnapshot = try await clients.fetchRateLimits(for: profile)
+                if profile.provider == .claude {
+                    if let profileIndex = statuses.firstIndex(where: { $0.id == profile.id }) {
+                        statuses[profileIndex].snapshot = firstSnapshot
+                    }
+                    continue
+                }
                 verificationFirstSnapshots.append((profile: profile, snapshot: firstSnapshot))
             } catch {
                 continue
@@ -388,7 +502,7 @@ final class UsageStore {
 
         for verification in verificationFirstSnapshots {
             do {
-                let verificationSecondSnapshot = try await client.fetchRateLimits(for: verification.profile)
+                let verificationSecondSnapshot = try await clients.fetchRateLimits(for: verification.profile)
                 let verificationElapsedSeconds = verificationSecondSnapshot.fetchedAt.timeIntervalSince(verification.snapshot.fetchedAt)
 
                 let verifiedShortWindow = verificationSecondSnapshot.shortWindow.map { currentWindow in
@@ -429,8 +543,12 @@ final class UsageStore {
         }
     }
 
-    private func classifySnapshot(newSnapshot: QuotaSnapshot, previousSnapshot: QuotaSnapshot?) -> QuotaSnapshot {
-        guard let previousSnapshot else {
+    private func classifySnapshot(
+        newSnapshot: QuotaSnapshot,
+        previousSnapshot: QuotaSnapshot?,
+        provider: ProfileProvider
+    ) -> QuotaSnapshot {
+        guard provider == .codex, let previousSnapshot else {
             return newSnapshot
         }
         let elapsedSeconds = newSnapshot.fetchedAt.timeIntervalSince(previousSnapshot.fetchedAt)
@@ -463,6 +581,38 @@ final class UsageStore {
             earliestResetCreditExpiresAt: newSnapshot.earliestResetCreditExpiresAt,
             fetchedAt: newSnapshot.fetchedAt
         )
+    }
+}
+
+private struct ProviderClients: Sendable {
+    let codex: AppServerClient
+    let claude: ClaudeUsageClient
+
+    func latestActivity(for profile: CodexProfile) async throws -> Date? {
+        switch profile.provider {
+        case .codex:
+            return try await ActivityReader.latestActivity(for: profile)
+        case .claude:
+            return try await ClaudeActivityReader.latestActivity(for: profile)
+        }
+    }
+
+    func fetchRateLimits(for profile: CodexProfile) async throws -> QuotaSnapshot {
+        switch profile.provider {
+        case .codex:
+            return try await codex.fetchRateLimits(for: profile)
+        case .claude:
+            return try await claude.fetchRateLimits(for: profile)
+        }
+    }
+
+    func sendActivationTurn(for profile: CodexProfile) async throws {
+        switch profile.provider {
+        case .codex:
+            try await codex.sendActivationTurn(for: profile)
+        case .claude:
+            try await claude.sendActivationTurn(for: profile)
+        }
     }
 }
 

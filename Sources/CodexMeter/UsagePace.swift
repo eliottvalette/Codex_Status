@@ -34,7 +34,9 @@ enum UsagePace {
     static func currentObservations(_ statuses: [ProfileStatus], now: Date) -> [String: WeeklyObservation] {
         var current: [String: WeeklyObservation] = [:]
         for status in statuses {
-            guard status.errorMessage == nil,
+            // Plan capacities are only comparable between Codex accounts.
+            guard status.profile.provider == .codex,
+                  status.errorMessage == nil,
                   let snapshot = status.snapshot,
                   now.timeIntervalSince(snapshot.fetchedAt) <= 600,
                   let observation = observation(snapshot),

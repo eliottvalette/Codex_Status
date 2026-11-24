@@ -3,29 +3,231 @@ import SwiftUI
 
 // MARK: - Root
 
+private enum DashboardLayout {
+    static let quadrantHeight: CGFloat = 198
+    static let codexGridHeight: CGFloat = 2 * quadrantHeight
+}
+
 struct DashboardView: View {
     let store: UsageStore
 
+    private var codexStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .codex }
+    }
+
+    private var claudeStatuses: [ProfileStatus] {
+        store.statuses.filter { $0.profile.provider == .claude }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            QuadrantGrid(
-                statuses: store.statuses,
-                mostRecentID: store.mostRecentProfileID,
-                onProfileRightClick: { profileID in
-                    Task { await store.handleProfileTap(profileID) }
-                },
-                onProfileLeftClick: {
-                    if store.transferSourceID != nil {
-                        store.cancelTransferSelection()
+            if codexStatuses.isEmpty == false {
+                QuadrantGrid(
+                    statuses: codexStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onProfileRightClick: { profileID in
+                        Task { await store.handleProfileTap(profileID) }
+                    },
+                    onProfileLeftClick: {
+                        if store.transferSourceID != nil {
+                            store.cancelTransferSelection()
+                        }
                     }
-                }
-            )
+                )
+                .frame(height: DashboardLayout.codexGridHeight)
+            }
+            if codexStatuses.isEmpty == false && claudeStatuses.isEmpty == false {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+            }
+            if claudeStatuses.isEmpty == false {
+                ProfileRows(
+                    statuses: claudeStatuses,
+                    mostRecentID: store.mostRecentProfileID,
+                    onProfileRightClick: { profileID in
+                        Task { await store.handleProfileTap(profileID) }
+                    },
+                    onProfileLeftClick: {
+                        if store.transferSourceID != nil {
+                            store.cancelTransferSelection()
+                        }
+                    }
+                )
+            }
+            if store.showsRecentChats {
+                Rectangle()
+                    .fill(.separator)
+                    .frame(height: 1)
+                RecentChatsSection(store: store)
+            }
             ControlRow(store: store)
         }
-        .frame(width: 640, height: 420)
+        .frame(width: 640)
         .onExitCommand {
             store.cancelTransferSelection()
         }
+    }
+}
+
+// MARK: - Claude rows
+
+/// Claude profiles are discovered at launch, so they are laid out two to a row
+/// below the fixed Codex grid.
+private struct ProfileRows: View {
+    let statuses: [ProfileStatus]
+    let mostRecentID: String?
+    let onProfileRightClick: (String) -> Void
+    let onProfileLeftClick: () -> Void
+
+    private var rows: [[ProfileStatus]] {
+        stride(from: 0, to: statuses.count, by: 2).map { start in
+            Array(statuses[start..<min(start + 2, statuses.count)])
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                if index > 0 {
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(height: 1)
+                }
+                HStack(spacing: 0) {
+                    quadrant(row[0])
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1)
+                    if row.count > 1 {
+                        quadrant(row[1])
+                    } else {
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: DashboardLayout.quadrantHeight)
+            }
+        }
+    }
+
+    private func quadrant(_ status: ProfileStatus) -> some View {
+        AliasQuadrant(
+            status: status,
+            isMostRecent: status.id == mostRecentID,
+            onRightClick: onProfileRightClick,
+            onLeftClick: onProfileLeftClick
+        )
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Recent Claude chats
+
+/// The newest conversations across Claude accounts, each with a one-click copy to the
+/// other accounts. The right-click copy of the three newest still works.
+private struct RecentChatsSection: View {
+    let store: UsageStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("RECENT CHATS")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .tracking(1)
+
+            if store.recentChats.isEmpty {
+                Text("No Claude conversations yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
+                        ForEach(store.recentChats) { chat in
+                            row(chat, now: context.date)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func row(_ chat: RecentClaudeChat, now: Date) -> some View {
+        GridRow {
+            Text(displayName(chat.profileID))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Text(RecentClaudeChat.ageLabel(since: chat.lastMessageAt, relativeTo: now))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .gridColumnAlignment(.trailing)
+
+            Text(chat.title)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(chat.folderName)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 110, alignment: .leading)
+
+            copyControl(chat)
+        }
+        .help(tooltip(chat))
+    }
+
+    @ViewBuilder
+    private func copyControl(_ chat: RecentClaudeChat) -> some View {
+        let destinations = store.claudeProfiles.filter { $0.id != chat.profileID }
+        if destinations.count == 1, let destination = destinations.first {
+            if chat.copiedToProfileIDs.contains(destination.id) {
+                Text("✓ \(destination.displayName)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .help("Already copied to \(destination.displayName)")
+            } else {
+                Button("→ \(destination.displayName)") {
+                    Task { await store.copyChat(chat, to: destination.id) }
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .buttonStyle(.borderless)
+                .disabled(store.isTransferring)
+                .help("Copy this conversation to \(destination.displayName)")
+            }
+        } else {
+            Menu("Copy to…") {
+                ForEach(destinations) { destination in
+                    let isCopied = chat.copiedToProfileIDs.contains(destination.id)
+                    Button(isCopied ? "✓ \(destination.displayName)" : destination.displayName) {
+                        Task { await store.copyChat(chat, to: destination.id) }
+                    }
+                    .disabled(isCopied)
+                }
+            }
+            .font(.system(size: 11))
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(store.isTransferring)
+        }
+    }
+
+    private func displayName(_ profileID: String) -> String {
+        store.claudeProfiles.first(where: { $0.id == profileID })?.displayName ?? profileID
+    }
+
+    private func tooltip(_ chat: RecentClaudeChat) -> String {
+        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)"]
+            .compactMap { $0 }
+            .joined(separator: "\n")
     }
 }
 
@@ -132,7 +334,8 @@ private struct AliasQuadrant: View {
                 profileID: status.id,
                 isEnabled: status.errorMessage == nil || status.snapshot != nil,
                 onRightClick: onRightClick,
-                onLeftClick: onLeftClick
+                onLeftClick: onLeftClick,
+                toolTip: status.errorMessage
             )
         }
     }
@@ -162,49 +365,72 @@ private struct AliasQuadrant: View {
 
     @ViewBuilder
     private var gaugeRow: some View {
-        if status.errorMessage != nil, status.snapshot == nil {
+        if let message = status.errorMessage, status.snapshot == nil {
+            // No reading yet: a smaller ring leaves room to say why.
             GeometryReader { geo in
-                let diameter = max(50, min(78, min(geo.size.width / 2 - 12, geo.size.height - 44)))
-                QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityLabel("Account unavailable")
+                let diameter = max(50, min(64, min(geo.size.width / 2 - 12, geo.size.height - 84)))
+                VStack(spacing: 4) {
+                    QuotaGauge(label: "WEEK", window: nil, diameter: diameter)
+                        .accessibilityLabel("Account unavailable")
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } else if status.snapshot != nil, status.snapshot?.shortWindow == nil {
+        } else if gauges.count == 1 {
             // Profile has no 5H quota — ring fills available space
             GeometryReader { geo in
                 let diameter = max(50, min(84, min(geo.size.width - 16, geo.size.height - 44)))
                 QuotaGauge(
-                    label: "WEEK",
-                    window: status.snapshot?.weeklyWindow,
+                    label: gauges[0].label,
+                    window: gauges[0].window,
                     diameter: diameter
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else {
             GeometryReader { geo in
-                let availableWidthPerGauge = geo.size.width / 2
+                let availableWidthPerGauge = geo.size.width / CGFloat(gauges.count)
                 let maxHorizontalDiameter = availableWidthPerGauge - 12
                 let maxVerticalDiameter = geo.size.height - 44
-                let diameter = max(50, min(78, min(maxHorizontalDiameter, maxVerticalDiameter)))
+                // Three rings share the box, so each gets a little less room.
+                let maxDiameter: CGFloat = gauges.count > 2 ? 70 : 78
+                let diameter = max(50, min(maxDiameter, min(maxHorizontalDiameter, maxVerticalDiameter)))
 
                 HStack(spacing: 0) {
-                    QuotaGauge(
-                        label: "5H",
-                        window: status.snapshot?.shortWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    QuotaGauge(
-                        label: "WEEK",
-                        window: status.snapshot?.weeklyWindow,
-                        diameter: diameter
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ForEach(Array(gauges.enumerated()), id: \.offset) { _, gauge in
+                        QuotaGauge(
+                            label: gauge.label,
+                            window: gauge.window,
+                            diameter: diameter
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    /// 5H when the plan has one, WEEK, then the tightest single-model weekly limit when
+    /// one is in use. Codex accounts report no model limits, so they show one or two rings.
+    private var gauges: [(label: String, window: QuotaWindow?)] {
+        guard let snapshot = status.snapshot else {
+            return [("5H", nil), ("WEEK", nil)]
+        }
+        var gauges: [(label: String, window: QuotaWindow?)] = []
+        if let shortWindow = snapshot.shortWindow {
+            gauges.append(("5H", shortWindow))
+        }
+        gauges.append(("WEEK", snapshot.weeklyWindow))
+        if let model = snapshot.tightestModelWindow {
+            gauges.append((model.label, model.window))
+        }
+        return gauges
     }
 }
 
@@ -315,6 +541,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
     let isEnabled: Bool
     let onRightClick: (String) -> Void
     let onLeftClick: () -> Void
+    var toolTip: String? = nil
 
     func makeNSView(context: Context) -> ProfileClickView {
         ProfileClickView()
@@ -325,6 +552,7 @@ private struct ProfileTransferOverlay: NSViewRepresentable {
             if isEnabled { onRightClick(profileID) }
         }
         nsView.onLeftClick = onLeftClick
+        nsView.toolTip = toolTip
     }
 
     final class ProfileClickView: NSView {
@@ -365,11 +593,13 @@ private struct QuotaGauge: View {
     }
 
     private func resetFraction(relativeTo now: Date) -> Double {
-        guard let window, let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
-            return 0
-        }
+        guard let window else { return 0 }
+        // An idle Claude window has no reset time yet, so check for idle first.
         if window.state == .dormant {
             return 1.0
+        }
+        guard let durationMinutes = window.durationMinutes, let resetsAt = window.resetsAt else {
+            return 0
         }
         let windowSeconds = Double(durationMinutes) * 60
         let timeLeft = max(0, resetsAt.timeIntervalSince(now))
@@ -514,8 +744,9 @@ private struct ControlRow: View {
             if let transferStatus {
                 Text(transferStatus)
                     .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
+                    .help(transferStatus)
             }
 
             Spacer()

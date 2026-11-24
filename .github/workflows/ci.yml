@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commands:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the command tests
+        run: |
+          python3 -B -m unittest discover -s Tests/CodexWhoTests
+          python3 -B -m unittest discover -s Tests/ClaudeWhoTests
+
+  app:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Package.swift needs Swift 6.2, which ships with Xcode 26.
+      - name: Select the newest Xcode 26
+        run: sudo xcode-select --switch "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+      - name: Show the toolchain
+        run: swift --version
+      - name: Run the Swift tests
+        run: swift test
+      - name: Build the app
+        run: ./Scripts/build_app.sh
