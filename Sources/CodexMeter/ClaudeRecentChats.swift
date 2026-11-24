@@ -40,15 +40,11 @@ struct RecentClaudeChat: Identifiable, Equatable, Sendable {
         if ClaudeProfiles.usesDefaultDirectory(profile, home: home) == false {
             let directory = profile.homeURL.standardizedFileURL
             let inHome = directory.deletingLastPathComponent().path == home.standardizedFileURL.path
-            let path = inHome ? "\"$HOME/\(directory.lastPathComponent)\"" : Self.shellQuoted(directory.path)
+            let path = inHome ? "\"$HOME/\(directory.lastPathComponent)\"" : ClaudeProfiles.shellQuoted(directory.path)
             command = "CLAUDE_CONFIG_DIR=\(path) " + command
         }
         guard let workingDirectory else { return command }
-        return "cd \(Self.shellQuoted(workingDirectory)) && " + command
-    }
-
-    private static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "cd \(ClaudeProfiles.shellQuoted(workingDirectory)) && " + command
     }
 }
 
@@ -266,6 +262,46 @@ actor ClaudeChatCatalog {
             .filter { $0["type"] as? String == "text" }
             .compactMap { $0["text"] as? String }
             .joined(separator: " ")
+    }
+
+    /// Names a conversation the way `/rename` does in Claude Code: one `custom-title` record
+    /// at the end of the transcript. Identical copies on other accounts get the same record
+    /// and the same modification time, so they stay identical.
+    static func rename(_ chat: RecentClaudeChat, to title: String, in profiles: [CodexProfile]) throws {
+        let title = cleanTitle(title)
+        guard title.isEmpty == false else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        func json(_ value: String) throws -> String {
+            String(decoding: try encoder.encode(value), as: UTF8.self)
+        }
+        let record = #"{"type":"custom-title","customTitle":\#(try json(title)),"sessionId":\#(try json(chat.file.sessionID))}"#
+
+        let copies = profiles.filter { chat.copiedToProfileIDs.contains($0.id) }.map {
+            $0.homeURL.appending(path: "projects")
+                .appending(path: chat.file.projectDirectoryName)
+                .appending(path: chat.file.url.lastPathComponent)
+        }
+        let renamedAt = Date()
+        for url in [chat.file.url] + copies {
+            let handle = try FileHandle(forUpdating: url)
+            do {
+                let end = try handle.seekToEnd()
+                // A record Claude Code is still writing would merge with this one.
+                if end > 0 {
+                    try handle.seek(toOffset: end - 1)
+                    guard try handle.read(upToCount: 1) == Data([0x0A]) else {
+                        throw ClaudeSessionTransferError.incompleteTranscript(sessionID: chat.file.sessionID)
+                    }
+                }
+                try handle.write(contentsOf: Data((record + "\n").utf8))
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
+            }
+            try FileManager.default.setAttributes([.modificationDate: renamedAt], ofItemAtPath: url.path)
+        }
     }
 
     /// One line, no control characters, at most 100 characters.

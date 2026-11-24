@@ -186,6 +186,14 @@ struct ClaudeUsageClientTests {
         }
     }
 
+    @Test("Reads who the profile is signed in as from claude auth status")
+    func parsesSignIn() {
+        #expect(ClaudeUsageParser.parseSignIn(Data(#"{"loggedIn": true, "email": "me@example.com"}"#.utf8))
+            == .signedIn(email: "me@example.com"))
+        #expect(ClaudeUsageParser.parseSignIn(Data(#"{"loggedIn": false}"#.utf8)) == .signedOut)
+        #expect(ClaudeUsageParser.parseSignIn(Data(#"{"loggedIn": true,"#.utf8)) == nil, "more lines to come")
+    }
+
     @Test("Ignores every other line Claude Code prints")
     func ignoresUnrelatedLines() throws {
         for line in [

@@ -146,6 +146,35 @@ struct ClaudeRecentChatsTests {
         }
     }
 
+    @Test("Renames a conversation and its identical copies the way /rename does")
+    func renamesConversation() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = profile("claude-work", in: home)
+        let personal = profile("claude-personal", in: home)
+        let modifiedAt = Date(timeIntervalSince1970: 1_795_400_000)
+        try write([prompt("one", at: "2026-11-20T10:00:00Z")], to: work, name: "s1", modifiedAt: modifiedAt)
+        try write([prompt("one", at: "2026-11-20T10:00:00Z")], to: personal, name: "s1", modifiedAt: modifiedAt)
+        let catalog = ClaudeChatCatalog()
+        let chat = try #require(await catalog.recentChats(in: [work, personal]).first)
+
+        try ClaudeChatCatalog.rename(chat, to: "  Login \"fix\"/v2 ", in: [work, personal])
+
+        let renamed = try #require(await catalog.recentChats(in: [work, personal]).first)
+        #expect(renamed.title == #"Login "fix"/v2"#)
+        #expect(renamed.copiedToProfileIDs == [personal.id], "the copy stays identical")
+        let lastLine = try #require(String(contentsOf: chat.file.url, encoding: .utf8).split(separator: "\n").last)
+        #expect(lastLine == #"{"type":"custom-title","customTitle":"Login \"fix\"/v2","sessionId":"s1"}"#)
+
+        try ClaudeChatCatalog.rename(renamed, to: "   ", in: [work, personal])
+        #expect(await catalog.recentChats(in: [work, personal]).first?.title == #"Login "fix"/v2"#)
+
+        try Data(prompt("cut off", at: "2026-11-20T11:00:00Z").utf8).write(to: chat.file.url, options: .atomic)
+        #expect(throws: ClaudeSessionTransferError.incompleteTranscript(sessionID: "s1")) {
+            try ClaudeChatCatalog.rename(chat, to: "Other", in: [work])
+        }
+    }
+
     @Test("Builds a command that resumes the conversation in a given account")
     func buildsResumeCommand() {
         let home = URL(fileURLWithPath: "/Users/me")

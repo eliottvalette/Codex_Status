@@ -15,10 +15,14 @@ final class UsageStoreClaudeTests {
 
     /// Stands in for Claude Code: the five-hour window is idle until an activation request
     /// creates the `window` file, unless `stuck` exists. A `weekly` file sets the weekly
-    /// utilization, and a `limited` file answers without limits.
+    /// utilization, a `limited` file answers without limits, and `signed-out` signs out.
     private let fakeClaude = """
         calls="$CLAUDE_CONFIG_DIR/calls"
         case " $* " in
+          *" auth status "*)
+            if [ -f "$CLAUDE_CONFIG_DIR/signed-out" ]; then echo '{"loggedIn": false}'; exit 1; fi
+            printf '{\\n  "loggedIn": true,\\n  "email": "me@example.com"\\n}\\n'
+            ;;
           *" --model haiku "*)
             echo activation >> "$calls"
             [ -f "$CLAUDE_CONFIG_DIR/stuck" ] || echo started > "$CLAUDE_CONFIG_DIR/window"
@@ -27,6 +31,10 @@ final class UsageStoreClaudeTests {
           *)
             read request
             echo usage >> "$calls"
+            if [ -f "$CLAUDE_CONFIG_DIR/signed-out" ]; then
+              echo '{"type":"control_response","response":{"subtype":"success","request_id":"codex-meter-usage","response":{"rate_limits_available":false,"rate_limits":null}}}'
+              exit 0
+            fi
             if [ -f "$CLAUDE_CONFIG_DIR/limited" ]; then
               echo '{"type":"control_response","response":{"subtype":"success","request_id":"codex-meter-usage","response":{"rate_limits_available":true,"rate_limits":null}}}'
               exit 0
@@ -101,6 +109,66 @@ final class UsageStoreClaudeTests {
         #expect(store.statuses[0].snapshot == reading)
     }
 
+    @Test("Shows who each account is signed in as, and reconnects a signed-out one")
+    func readsSignInAndReconnects() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let personal = try profile("claude-personal", in: home)
+        try Data().write(to: personal.homeURL.appending(path: "signed-out"))
+        let store = try makeStore([work, personal], home: home)
+
+        await store.refresh()
+
+        #expect(store.statuses[0].signIn == .signedIn(email: "me@example.com"))
+        #expect(store.statuses[1].signIn == .signedOut)
+        #expect(store.statuses[1].errorMessage == ClaudeUsageError.planLimitsUnavailable.errorDescription)
+
+        await store.reconnect(personal.id)
+        #expect(recorder.signIns == [personal.id], "a signed-out account opens Terminal to sign in")
+
+        try FileManager.default.removeItem(at: personal.homeURL.appending(path: "signed-out"))
+        await store.reconnect(personal.id)
+        #expect(store.statuses[1].signIn == .signedIn(email: "me@example.com"))
+        #expect(store.statuses[1].errorMessage == nil)
+        #expect(recorder.signIns == [personal.id])
+    }
+
+    @Test("Reconnect reads a paused account again at once")
+    func reconnectEndsThePause() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        try Data().write(to: work.homeURL.appending(path: "limited"))
+        let store = try makeStore([work], home: home)
+        await store.refresh()
+        try FileManager.default.removeItem(at: work.homeURL.appending(path: "limited"))
+
+        await store.reconnect(work.id)
+
+        #expect(store.statuses[0].errorMessage == nil)
+        #expect(store.statuses[0].snapshot?.weeklyWindow?.remainingPercent == 80)
+    }
+
+    @Test("Adds an account, shows it, and opens Terminal to sign in")
+    func addsAccount() async throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let work = try profile("claude-work", in: home)
+        let store = try makeStore([work], home: home)
+
+        await store.addClaudeAccount(named: "Bad Name")
+        #expect(store.statuses.count == 1)
+        #expect(store.transferFeedback?.style == .failure)
+
+        await store.addClaudeAccount(named: "personal")
+
+        #expect(store.statuses.map(\.id) == ["claude-work", "claude-personal"])
+        #expect(FileManager.default.fileExists(atPath: home.appending(path: ".claude-personal").path))
+        #expect(recorder.signIns == ["claude-personal"])
+        #expect(store.showsRecentChats)
+    }
+
     @Test("Starts no idle window when the setting is off")
     func respectsActivationSetting() async throws {
         let home = try temporaryDirectory()
@@ -124,7 +192,7 @@ final class UsageStoreClaudeTests {
             profiles: [work],
             claudeClient: ClaudeUsageClient(cli: ClaudeCLI(executableURL: home.appending(path: "absent"), home: home)),
             settings: settings,
-            notifier: recorder
+            desktop: recorder
         )
 
         await store.refresh()
@@ -281,13 +349,12 @@ final class UsageStoreClaudeTests {
         let executable = home.appending(path: "claude")
         try Data("#!/bin/sh\n\(fakeClaude)\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let recorder = recorder
         return UsageStore(
             profiles: profiles,
             claudeClient: ClaudeUsageClient(cli: ClaudeCLI(executableURL: executable, home: home)),
             settings: settings,
-            notifier: recorder,
-            writeToClipboard: { recorder.clipboard.append($0) }
+            desktop: recorder,
+            home: home
         )
     }
 
@@ -311,14 +378,23 @@ final class UsageStoreClaudeTests {
             .split(separator: "\n").map(String.init)
     }
 
-    /// Keeps what the store would put on the clipboard and in notifications.
+    /// Keeps what the store would show, copy or open on the Mac.
     @MainActor
-    private final class Recorder: LowLimitNotifier {
+    private final class Recorder: DesktopActions {
         var clipboard: [String] = []
         var notifications: [(title: String, body: String)] = []
+        var signIns: [String] = []
 
         func notify(title: String, body: String) {
             notifications.append((title, body))
+        }
+
+        func copyToClipboard(_ text: String) {
+            clipboard.append(text)
+        }
+
+        func openSignIn(for profile: CodexProfile) {
+            signIns.append(profile.id)
         }
     }
 

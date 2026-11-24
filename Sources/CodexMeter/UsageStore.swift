@@ -23,8 +23,8 @@ final class UsageStore {
     private var lowAccountIDs: Set<String> = []
 
     let settings: AppSettings
-    private let notifier: any LowLimitNotifier
-    private let writeToClipboard: @MainActor (String) -> Void
+    private let desktop: any DesktopActions
+    private let home: URL
 
     private let clients: ProviderClients
     private let transferService: SessionTransferService
@@ -39,8 +39,8 @@ final class UsageStore {
         claudeTransferService: ClaudeSessionTransferService = ClaudeSessionTransferService(),
         chatCatalog: ClaudeChatCatalog = ClaudeChatCatalog(),
         settings: AppSettings = AppSettings(),
-        notifier: any LowLimitNotifier = SystemNotifier(),
-        writeToClipboard: @escaping @MainActor (String) -> Void = UsageStore.writeToPasteboard
+        desktop: any DesktopActions = Desktop(),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         statuses = profiles.map {
             ProfileStatus(
@@ -57,13 +57,8 @@ final class UsageStore {
         self.claudeTransferService = claudeTransferService
         self.chatCatalog = chatCatalog
         self.settings = settings
-        self.notifier = notifier
-        self.writeToClipboard = writeToClipboard
-    }
-
-    static func writeToPasteboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        self.desktop = desktop
+        self.home = home
     }
 
     func paceValue(relativeTo now: Date) -> PaceValue? {
@@ -230,7 +225,7 @@ final class UsageStore {
 
         guard let copiedCount = await copyChats([chat], from: source, to: destination) else { return }
         // The next step is to open it there, so the command that does it is ready to paste.
-        writeToClipboard(chat.resumeCommand(in: destination))
+        desktop.copyToClipboard(chat.resumeCommand(in: destination))
         let title = chat.title.count > 32 ? chat.title.prefix(31) + "…" : chat.title
         let outcome = copiedCount == 0 ? "already on" : "copied to"
         report("✓ “\(title)” \(outcome) \(destination.displayName) · resume command copied", style: .success)
@@ -254,8 +249,51 @@ final class UsageStore {
 
     func copyResumeCommand(for chat: RecentClaudeChat) {
         guard let profile = claudeProfiles.first(where: { $0.id == chat.profileID }) else { return }
-        writeToClipboard(chat.resumeCommand(in: profile))
+        desktop.copyToClipboard(chat.resumeCommand(in: profile))
         report("Resume command for \(profile.displayName) copied", style: .success)
+    }
+
+    func renameChat(_ chat: RecentClaudeChat, to title: String) async {
+        do {
+            try ClaudeChatCatalog.rename(chat, to: title, in: claudeProfiles)
+            report("✓ Renamed", style: .success)
+        } catch {
+            report(error.localizedDescription, style: .failure)
+        }
+        await reloadRecentChats()
+    }
+
+    /// Creates a Claude account, shows it, and opens Terminal in it to sign in.
+    func addClaudeAccount(named name: String) async {
+        let profile: CodexProfile
+        do {
+            profile = try ClaudeProfiles.createAccount(named: name, home: home)
+        } catch {
+            report(error.localizedDescription, style: .failure)
+            return
+        }
+        if statuses.contains(where: { $0.profile.homeURL.standardizedFileURL == profile.homeURL.standardizedFileURL }) == false {
+            statuses.append(ProfileStatus(profile: profile))
+        }
+        desktop.openSignIn(for: profile)
+        await refresh()
+        report("Sign in to \(profile.displayName) in Terminal, then press Reconnect", style: .progress)
+    }
+
+    /// Reads a disconnected Claude account again at once. When it turns out to be signed
+    /// out, opens Terminal in it to sign in.
+    func reconnect(_ profileID: String) async {
+        guard
+            isRefreshing == false,
+            let index = statuses.firstIndex(where: { $0.id == profileID }),
+            statuses[index].profile.provider == .claude
+        else { return }
+        claudeUsagePausedUntil[profileID] = nil
+        statuses[index].signIn = nil
+        await refresh()
+        guard let status = statuses.first(where: { $0.id == profileID }), status.signIn == .signedOut else { return }
+        desktop.openSignIn(for: status.profile)
+        report("Sign in to \(status.profile.displayName) in Terminal, then press Reconnect", style: .progress)
     }
 
     func report(_ message: String, style: TransferFeedback.Style) {
@@ -362,10 +400,17 @@ final class UsageStore {
         let profiles = statuses.map(\.profile)
         let clients = self.clients
         let pausedIDs = Set(claudeUsagePausedUntil.filter { $0.value > .now }.keys)
+        // Who an account is signed in as is read until it is known.
+        let signInIDs = Set(statuses.filter { status in
+            if case .signedIn = status.signIn { return false }
+            return status.profile.provider == .claude
+        }.map(\.id))
 
         await withTaskGroup(of: FetchResult.self) { group in
             for profile in profiles {
                 group.addTask {
+                    async let signIn = signInIDs.contains(profile.id)
+                        ? try? await clients.claude.fetchSignIn(for: profile) : nil
                     let activityOutcome: ActivityOutcome
                     do {
                         activityOutcome = .success(try await clients.latestActivity(for: profile))
@@ -373,29 +418,24 @@ final class UsageStore {
                         activityOutcome = .failure(error.localizedDescription)
                     }
 
-                    guard pausedIDs.contains(profile.id) == false else {
-                        return FetchResult(profileID: profile.id, quotaOutcome: .paused, activityOutcome: activityOutcome)
+                    let quotaOutcome: FetchOutcome
+                    if pausedIDs.contains(profile.id) {
+                        quotaOutcome = .paused
+                    } else {
+                        do {
+                            quotaOutcome = .success(try await clients.fetchRateLimits(for: profile))
+                        } catch ClaudeUsageError.usageTemporarilyUnavailable {
+                            quotaOutcome = .unavailable(ClaudeUsageError.usageTemporarilyUnavailable.localizedDescription)
+                        } catch {
+                            quotaOutcome = .failure(error.localizedDescription)
+                        }
                     }
-                    do {
-                        let snapshot = try await clients.fetchRateLimits(for: profile)
-                        return FetchResult(
-                            profileID: profile.id,
-                            quotaOutcome: .success(snapshot),
-                            activityOutcome: activityOutcome
-                        )
-                    } catch ClaudeUsageError.usageTemporarilyUnavailable {
-                        return FetchResult(
-                            profileID: profile.id,
-                            quotaOutcome: .unavailable(ClaudeUsageError.usageTemporarilyUnavailable.localizedDescription),
-                            activityOutcome: activityOutcome
-                        )
-                    } catch {
-                        return FetchResult(
-                            profileID: profile.id,
-                            quotaOutcome: .failure(error.localizedDescription),
-                            activityOutcome: activityOutcome
-                        )
-                    }
+                    return FetchResult(
+                        profileID: profile.id,
+                        quotaOutcome: quotaOutcome,
+                        activityOutcome: activityOutcome,
+                        signIn: await signIn
+                    )
                 }
             }
 
@@ -404,6 +444,9 @@ final class UsageStore {
                     continue
                 }
                 statuses[index].isRefreshing = false
+                if let signIn = result.signIn {
+                    statuses[index].signIn = signIn
+                }
                 switch result.quotaOutcome {
                 case let .success(newSnapshot):
                     let previousSnapshot = statuses[index].snapshot
@@ -447,7 +490,7 @@ final class UsageStore {
         if settings.notifiesLowLimits {
             for status in statuses where low.contains(status.id) && lowAccountIDs.contains(status.id) == false {
                 if let alert = LowLimits.alert(for: status, in: statuses) {
-                    notifier.notify(title: alert.title, body: alert.body)
+                    desktop.notify(title: alert.title, body: alert.body)
                 }
             }
         }
@@ -750,6 +793,7 @@ private struct FetchResult: Sendable {
     let profileID: String
     let quotaOutcome: FetchOutcome
     let activityOutcome: ActivityOutcome
+    let signIn: AccountSignIn?
 }
 
 private enum FetchOutcome: Sendable {

@@ -73,10 +73,61 @@ enum ClaudeProfiles {
         return name.hasPrefix(encoded.prefix(maximumProjectNameLength) + "-")
     }
 
+    /// Creates `~/.claude-<name>` and a `claude-<name>` alias in the shell file, as
+    /// `claude-accounts add` does. Returns the new profile.
+    static func createAccount(
+        named rawName: String,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        shell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    ) throws -> CodexProfile {
+        guard let name = accountName(rawName) else { throw ClaudeAccountError.invalidName }
+        let directory = home.appending(path: "\(defaultDirectoryName)-\(name)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+        )
+
+        let alias = "claude-\(name)"
+        let hasAlias = [".zshrc", ".bashrc", ".bash_profile", ".zprofile"].contains { file in
+            let text = (try? String(contentsOf: home.appending(path: file), encoding: .utf8)) ?? ""
+            return text.range(of: #"(?m)^\s*alias\s+\#(alias)="#, options: .regularExpression) != nil
+        }
+        if hasAlias == false {
+            let shellFile = home.appending(path: shell.hasSuffix("bash") ? ".bashrc" : ".zshrc")
+            let line = "\n# Claude Code account, added by CodexMeter\nalias \(alias)='CLAUDE_CONFIG_DIR=\"$HOME/.\(alias)\" claude'\n"
+            if let handle = try? FileHandle(forWritingTo: shellFile) {
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: Data(line.utf8))
+            } else {
+                try Data(line.utf8).write(to: shellFile)
+            }
+        }
+        return CodexProfile(id: alias, displayName: alias, homeURL: directory, provider: .claude)
+    }
+
+    /// The name a new account can take, without the `claude-` prefix, or `nil`.
+    static func accountName(_ rawName: String) -> String? {
+        var name = rawName.trimmingCharacters(in: .whitespaces).lowercased()
+        if name.hasPrefix("claude-") { name.removeFirst("claude-".count) }
+        return name.range(of: #"^[a-z0-9][a-z0-9-]{0,39}$"#, options: .regularExpression) == nil ? nil : name
+    }
+
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     private static func isDirectory(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
             && isDirectory.boolValue
+    }
+}
+
+enum ClaudeAccountError: Error, Equatable, LocalizedError {
+    case invalidName
+
+    var errorDescription: String? {
+        "Use lowercase letters, digits and hyphens for the account name, such as work."
     }
 }
 

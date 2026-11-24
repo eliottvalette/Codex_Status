@@ -1,14 +1,18 @@
+import AppKit
 import Foundation
 import ServiceManagement
 import UserNotifications
 
+/// What the store asks of the Mac outside the app. Tests record these instead.
 @MainActor
-protocol LowLimitNotifier {
+protocol DesktopActions {
     func notify(title: String, body: String)
+    func copyToClipboard(_ text: String)
+    /// Opens Terminal with Claude Code running in the account, where the user signs in.
+    func openSignIn(for profile: CodexProfile)
 }
 
-/// Posts a macOS notification, asking for permission the first time.
-struct SystemNotifier: LowLimitNotifier {
+struct Desktop: DesktopActions {
     func notify(title: String, body: String) {
         // Notifications need an app bundle; `swift test` and `swift run` have none.
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
@@ -19,6 +23,35 @@ struct SystemNotifier: LowLimitNotifier {
         Task {
             guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
             try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
+    }
+
+    func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func openSignIn(for profile: CodexProfile) {
+        // A .command file opens in Terminal without asking for any permission.
+        let script = FileManager.default.temporaryDirectory
+            .appending(path: "CodexMeter-sign-in-\(profile.id).command")
+        let executable = (try? ClaudeCLI().resolvedExecutable().path) ?? "claude"
+        let configuration = ClaudeProfiles.usesDefaultDirectory(profile)
+            ? "unset CLAUDE_CONFIG_DIR"
+            : "export CLAUDE_CONFIG_DIR=\(ClaudeProfiles.shellQuoted(profile.homeURL.path))"
+        let text = """
+            #!/bin/zsh
+            \(configuration)
+            echo "Signing in to \(profile.displayName). Run /login if Claude Code does not ask."
+            exec \(ClaudeProfiles.shellQuoted(executable))
+
+            """
+        do {
+            try Data(text.utf8).write(to: script)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+            NSWorkspace.shared.open(script)
+        } catch {
+            NSSound.beep()
         }
     }
 }

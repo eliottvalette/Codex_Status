@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+/// In the macOS 27 SDK `@State` is also a macro, and its plugin ships with Xcode but not with
+/// the Command Line Tools. The property wrapper under another name builds with both.
+private typealias ViewState = SwiftUI.State
+
 // MARK: - Root
 
 private enum DashboardLayout {
@@ -45,6 +49,9 @@ struct DashboardView: View {
                 ProfileRows(
                     statuses: claudeStatuses,
                     mostRecentID: store.mostRecentProfileID,
+                    onReconnect: { profileID in
+                        Task { await store.reconnect(profileID) }
+                    },
                     onProfileRightClick: { profileID in
                         Task { await store.handleProfileTap(profileID) }
                     },
@@ -77,6 +84,7 @@ struct DashboardView: View {
 private struct ProfileRows: View {
     let statuses: [ProfileStatus]
     let mostRecentID: String?
+    let onReconnect: (String) -> Void
     let onProfileRightClick: (String) -> Void
     let onProfileLeftClick: () -> Void
 
@@ -116,7 +124,8 @@ private struct ProfileRows: View {
             status: status,
             isMostRecent: status.id == mostRecentID,
             onRightClick: onProfileRightClick,
-            onLeftClick: onProfileLeftClick
+            onLeftClick: onProfileLeftClick,
+            onReconnect: onReconnect
         )
         .frame(maxWidth: .infinity)
     }
@@ -128,6 +137,9 @@ private struct ProfileRows: View {
 /// other accounts. The right-click copy of the three newest still works.
 private struct RecentChatsSection: View {
     let store: UsageStore
+    @ViewState private var renamingID: String?
+    @ViewState private var draftTitle = ""
+    @FocusState private var isEditingTitle: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -171,11 +183,7 @@ private struct RecentChatsSection: View {
                 .foregroundStyle(.secondary)
                 .gridColumnAlignment(.trailing)
 
-            Text(chat.title)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            title(chat)
 
             Text(chat.folderName)
                 .font(.system(size: 11))
@@ -198,6 +206,36 @@ private struct RecentChatsSection: View {
             }
         }
         .help(tooltip(chat))
+    }
+
+    /// Double-click the title to rename the conversation; Return saves, Escape cancels.
+    @ViewBuilder
+    private func title(_ chat: RecentClaudeChat) -> some View {
+        if renamingID == chat.id {
+            TextField("Title", text: $draftTitle)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .focused($isEditingTitle)
+                .onAppear { isEditingTitle = true }
+                .onSubmit {
+                    renamingID = nil
+                    let title = draftTitle
+                    Task { await store.renameChat(chat, to: title) }
+                }
+                .onExitCommand { renamingID = nil }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(chat.title)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    draftTitle = chat.title
+                    renamingID = chat.id
+                }
+        }
     }
 
     private func suggestion(_ move: ChatMove) -> some View {
@@ -256,7 +294,7 @@ private struct RecentChatsSection: View {
     }
 
     private func tooltip(_ chat: RecentClaudeChat) -> String {
-        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)"]
+        [chat.title, chat.workingDirectory, "Session \(chat.file.sessionID)", "Double-click the title to rename it."]
             .compactMap { $0 }
             .joined(separator: "\n")
     }
@@ -325,6 +363,12 @@ private struct AliasQuadrant: View {
     let isMostRecent: Bool
     let onRightClick: (String) -> Void
     let onLeftClick: () -> Void
+    /// Claude accounts only: reads a disconnected account again.
+    var onReconnect: ((String) -> Void)? = nil
+
+    private var isDisconnected: Bool {
+        status.errorMessage != nil || status.signIn == .signedOut
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -343,6 +387,17 @@ private struct AliasQuadrant: View {
                 toolTip: status.errorMessage
             )
         }
+        // Above the click overlay, so the button gets its clicks.
+        .overlay(alignment: .topTrailing) {
+            if let onReconnect, isDisconnected, status.isRefreshing == false {
+                Button("Reconnect") { onReconnect(status.id) }
+                    .font(.system(size: 10))
+                    .buttonStyle(.borderless)
+                    .padding(.top, 9)
+                    .padding(.trailing, 12)
+                    .help("Read this account again. Opens Terminal to sign in when it is signed out.")
+            }
+        }
     }
 
     private var aliasHeader: some View {
@@ -352,6 +407,18 @@ private struct AliasQuadrant: View {
                 .foregroundStyle(isMostRecent ? .primary : .secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
+
+            if let email = status.signIn?.email {
+                Text(email)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else if status.signIn == .signedOut {
+                Text("signed out")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+            }
 
             if status.isStale {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -620,6 +687,57 @@ private struct QuotaGauge: View {
 
 // MARK: - Control row
 
+/// Creates a Claude account and opens Terminal in it to sign in.
+private struct AddAccountButton: View {
+    let store: UsageStore
+    @ViewState private var isAdding = false
+    @ViewState private var name = ""
+
+    private var accountName: String? {
+        ClaudeProfiles.accountName(name)
+    }
+
+    var body: some View {
+        Button {
+            isAdding = true
+        } label: {
+            Image(systemName: "plus")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Add a Claude account")
+        .popover(isPresented: $isAdding, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add a Claude account")
+                    .font(.headline)
+                TextField("Name, such as work", text: $name)
+                    .onSubmit(add)
+                Text("Creates ~/.claude-\(accountName ?? "name") and a claude-\(accountName ?? "name") alias, then opens Terminal so you can sign in.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { isAdding = false }
+                    Button("Add", action: add)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(accountName == nil)
+                }
+            }
+            .padding(12)
+            .frame(width: 260)
+        }
+    }
+
+    private func add() {
+        guard accountName != nil else { return }
+        let requested = name
+        name = ""
+        isAdding = false
+        Task { await store.addClaudeAccount(named: requested) }
+    }
+}
+
 private struct SettingsMenu: View {
     @Bindable var settings: AppSettings
     let store: UsageStore
@@ -708,6 +826,8 @@ private struct ControlRow: View {
                 .accessibilityLabel("Sync Codex conversations from the last 10 days")
                 .help("Sync Codex conversations from the last 10 days")
             }
+
+            AddAccountButton(store: store)
 
             SettingsMenu(store: store)
 

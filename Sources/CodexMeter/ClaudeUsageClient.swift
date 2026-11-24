@@ -62,6 +62,23 @@ struct ClaudeUsageClient: Sendable {
         )
     }
 
+    /// Asks Claude Code who the profile is signed in as. Never reads the stored sign-in.
+    @concurrent
+    func fetchSignIn(for profile: CodexProfile) async throws -> AccountSignIn {
+        try Task.checkCancellation()
+        // The answer is indented JSON over several lines.
+        var output = Data()
+        return try cli.run(
+            arguments: ["auth", "status", "--json"],
+            for: profile,
+            timeout: timeout,
+            onLine: { line in
+                output.append(line)
+                return ClaudeUsageParser.parseSignIn(output)
+            }
+        )
+    }
+
     /// Sends one short request to the smallest model so an idle window starts counting.
     @concurrent
     func sendActivationTurn(for profile: CodexProfile) async throws {
@@ -148,6 +165,15 @@ enum ClaudeUsageParser {
         add("Opus", rateLimits["seven_day_opus"])
         add("Sonnet", rateLimits["seven_day_sonnet"])
         return windows
+    }
+
+    /// Returns the sign-in once `data` holds the whole answer of `claude auth status`.
+    static func parseSignIn(_ data: Data) -> AccountSignIn? {
+        guard let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        guard status["loggedIn"] as? Bool == true else { return .signedOut }
+        return .signedIn(email: status["email"] as? String)
     }
 
     /// Returns `true` once the final result of the activation request arrives.

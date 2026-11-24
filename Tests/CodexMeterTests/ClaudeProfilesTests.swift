@@ -119,6 +119,30 @@ struct ClaudeProfilesTests {
         #expect(Array(UsagePace.currentObservations(statuses, now: now).keys) == ["codex"])
     }
 
+    @Test("Creates an account directory and its alias once, as claude-accounts does")
+    func createsAccount() throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let profile = try ClaudeProfiles.createAccount(named: "claude-Work ", home: home, shell: "/bin/zsh")
+        _ = try ClaudeProfiles.createAccount(named: "work", home: home, shell: "/bin/zsh")
+
+        #expect(profile.id == "claude-work")
+        #expect(profile.provider == .claude)
+        let attributes = try FileManager.default.attributesOfItem(atPath: home.appending(path: ".claude-work").path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        let zshrc = try String(contentsOf: home.appending(path: ".zshrc"), encoding: .utf8)
+        #expect(zshrc.components(separatedBy: #"alias claude-work='CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude'"#).count == 2)
+
+        _ = try ClaudeProfiles.createAccount(named: "personal", home: home, shell: "/bin/bash")
+        #expect(FileManager.default.fileExists(atPath: home.appending(path: ".bashrc").path))
+        for name in ["", "my work", "-x", "a/b", "ü"] {
+            #expect(throws: ClaudeAccountError.invalidName) {
+                try ClaudeProfiles.createAccount(named: name, home: home)
+            }
+        }
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "CodexMeterTests-\(UUID().uuidString)")

@@ -140,9 +140,21 @@ struct QuotaSnapshot: Equatable, Sendable {
     }
 }
 
+/// Who a Claude profile is signed in as, from `claude auth status`.
+enum AccountSignIn: Equatable, Sendable {
+    case signedIn(email: String?)
+    case signedOut
+
+    var email: String? {
+        if case let .signedIn(email) = self { return email }
+        return nil
+    }
+}
+
 struct ProfileStatus: Identifiable, Sendable {
     let profile: CodexProfile
     var snapshot: QuotaSnapshot?
+    var signIn: AccountSignIn?
     var errorMessage: String?
     var lastActivity: Date?
     var activityErrorMessage: String?
